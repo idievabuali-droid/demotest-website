@@ -1,0 +1,10 @@
+{
+  "name": "fresh-starter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal starter scaffold created by GitHub Copilot",
+  "scripts": {
+    "start": "live-server --port=5173"
+  },
+  "devDependencies": {}
+}
