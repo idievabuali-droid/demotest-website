@@ -1,1 +1,1 @@
-Deploy trigger file - commit d588bfd at 2025-08-31
+FORCE_COMPLETE_REDEPLOY_$(Get-Date -Format "yyyyMMdd_HHmmss") - commit 929f8af - All UX improvements implemented
