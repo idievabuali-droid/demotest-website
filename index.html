@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Nova Mobile Wholesale</title>
+  <title>Odil Accessories</title>
   <meta name="description" content="Wholesale phone accessories catalogue with WhatsApp ordering" />
   <!-- Tailwind Play CDN (generates utilities at runtime) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -70,7 +70,7 @@
    */
 
     // ---- Constants ----
-    const BRAND_NAME = "Nova Mobile Wholesale";
+    const BRAND_NAME = "Odil Accessories";
     const TAGLINE = "Simple wholesale catalogue with WhatsApp ordering.";
     const CURRENCY = "GBP";
     const CURRENCY_SYMBOL = "£";
@@ -371,29 +371,43 @@
       useEffect(()=>{ const onScroll=()=> setScrolled(window.scrollY>4); onScroll(); window.addEventListener('scroll', onScroll, { passive:true }); return ()=> window.removeEventListener('scroll', onScroll); },[]);
       return React.createElement('header', { className: cx("sticky top-0 z-40 w-full backdrop-blur supports-[backdrop-filter]:bg-white/60", scrolled?"shadow-sm":"") },
         React.createElement('div', { className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8' },
-          React.createElement('div', { className: 'flex h-14 items-center justify-between' },
-            React.createElement('div', { className: 'flex items-center gap-2' },
-              React.createElement(Logo, { className: 'h-6 w-6 text-indigo-600' }),
-              React.createElement('span', { className: 'font-semibold text-gray-900' }, BRAND_NAME)
+          React.createElement('div', { className: 'flex h-16 items-center justify-between gap-2' },
+            React.createElement('div', { className: 'flex items-center gap-2 min-w-0' },
+              React.createElement(Logo, { className: 'h-6 w-6 text-indigo-600 flex-shrink-0' }),
+              React.createElement('span', { className: 'font-semibold text-gray-900 text-sm sm:text-base truncate' }, BRAND_NAME)
             ),
-            React.createElement('nav', { className: 'flex items-center gap-2' },
-              !ownerMode && React.createElement('label', { className: 'relative' },
+            React.createElement('nav', { className: 'flex items-center gap-1 sm:gap-2' },
+              !ownerMode && React.createElement('label', { className: 'relative hidden sm:block' },
                 React.createElement('span', { className: 'sr-only' }, 'Search'),
                 React.createElement('input', {
                   value: search,
                   onChange: (e)=> setSearch(e.target.value),
                   placeholder: 'Search products…',
                   type: 'search',
-                  className: 'w-44 sm:w-64 rounded-full border border-gray-300 bg-white/90 px-3 py-1.5 text-sm shadow-inner placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-600'
+                  className: 'w-44 md:w-64 rounded-full border border-gray-300 bg-white/90 px-3 py-1.5 text-sm shadow-inner placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-600'
                 }),
                     React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400' })
               ),
-              React.createElement('button', { onClick: ()=> setOwnerMode(!ownerMode), className: 'rounded-full border border-gray-300 bg-white/90 px-3 py-1.5 text-sm shadow hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, ownerMode? 'Back to catalogue' : 'Owner'),
-              React.createElement('button', { onClick: onOpenCart, className: 'relative inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white/90 px-3 py-1.5 text-sm shadow hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' },
+              React.createElement('button', { onClick: ()=> setOwnerMode(!ownerMode), className: 'rounded-full border border-gray-300 bg-white/90 px-2 sm:px-3 py-1.5 text-xs sm:text-sm shadow hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, ownerMode? 'Back' : 'Owner'),
+              React.createElement('button', { onClick: onOpenCart, className: 'relative inline-flex items-center gap-1 rounded-full border border-gray-300 bg-white/90 px-2 sm:px-3 py-1.5 text-xs sm:text-sm shadow hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' },
                 React.createElement(CartIcon, { className: 'h-4 w-4' }),
                 React.createElement('span', { className: 'hidden sm:inline' }, 'Cart'),
                 cartQty > 0 && React.createElement('span', { 'aria-live': 'polite', className: 'absolute -top-1.5 -right-1.5 min-w-[1.25rem] rounded-full bg-indigo-600 px-1 text-center text-[10px] font-semibold text-white' }, String(cartQty))
               )
+            )
+          ),
+          // Mobile search bar below header on small screens
+          !ownerMode && React.createElement('div', { className: 'sm:hidden pb-2' },
+            React.createElement('label', { className: 'relative block' },
+              React.createElement('span', { className: 'sr-only' }, 'Search'),
+              React.createElement('input', {
+                value: search,
+                onChange: (e)=> setSearch(e.target.value),
+                placeholder: 'Search products…',
+                type: 'search',
+                className: 'w-full rounded-full border border-gray-300 bg-white/90 px-3 py-2 text-sm shadow-inner placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-600'
+              }),
+              React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400' })
             )
           )
         )
@@ -1436,6 +1450,8 @@
       // Merge base CATALOG with owner overrides/hides
       const allProducts = useMemo(() => {
         const map = new Map(CATALOG.map(p => [p.id, p]));
+        const newProducts = [];
+        
         ownerProducts.forEach(op => {
           if (op.sourceId && map.has(op.sourceId)) {
             if (op.hidden) {
@@ -1444,9 +1460,19 @@
             }
             map.delete(op.sourceId);
           }
-          if (!op.hidden) map.set(op.id, op);
+          if (!op.hidden) {
+            if (!op.sourceId) {
+              // This is a new product, add to newProducts array
+              newProducts.push(op);
+            } else {
+              // This is an override of existing product
+              map.set(op.id, op);
+            }
+          }
         });
-        return Array.from(map.values());
+        
+        // Return new products first, then existing products
+        return [...newProducts, ...Array.from(map.values())];
       }, [ownerProducts]);
       const filteredProducts = useMemo(() => {
         let filtered = allProducts;
