@@ -8,12 +8,11 @@
 [build.environment]
   # Optional: Set any environment variables here
 
-# Redirects and headers
+# Redirects for SPA (Single Page Application)
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
-  conditions = {Role = ["admin"]}
 
 # Optional: Custom headers
 [[headers]]
