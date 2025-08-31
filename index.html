@@ -10,6 +10,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Supabase -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <style>
     :root {
       --ring: 0 0 0 calc(3px + var(--tw-ring-offset-width, 0px)) var(--tw-ring-color, rgb(59 130 246 / var(--tw-ring-opacity, 0.5)));
@@ -77,6 +79,124 @@
     const WHATSAPP_NUMBER_E164 = "992935563306";
     const CART_STORAGE_KEY = "nova_wholesale_cart_v1";
     const OWNER_STORAGE_KEY = "nova_owner_products_v1";
+
+    // ---- Supabase Configuration ----
+    // TODO: Replace with your actual Supabase project URL and anon key
+    // Get these from: https://app.supabase.com/project/[your-project-id]/settings/api
+    // 
+    // SETUP STEPS:
+    // 1. Create a table called 'products' in your Supabase database with this SQL:
+    // CREATE TABLE products (
+    //   id text PRIMARY KEY,
+    //   name text NOT NULL,
+    //   sku text NOT NULL,
+    //   category text NOT NULL,
+    //   price decimal NOT NULL,
+    //   description text,
+    //   specs jsonb DEFAULT '[]'::jsonb,
+    //   sourceId text,
+    //   hidden boolean DEFAULT false,
+    //   created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+    // );
+    // 
+    // 2. Enable Row Level Security (RLS) if needed:
+    // ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+    // 
+    // 3. Create a policy to allow all operations (adjust as needed):
+    // CREATE POLICY "Enable all operations for products" ON products FOR ALL USING (true);
+    // 
+    // 4. Replace the placeholders below with your actual credentials
+    const SUPABASE_URL = 'https://bslehhvvtyxxpbgddcbt.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzbGVoaHZ2dHl4eHBiZ2RkY2J0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1NjYxMjMsImV4cCI6MjA3MjE0MjEyM30.-b5qm72nssT5CVeb3BdLyP8k-7cE_ZyGq5MC3Ilirmk';
+    
+    // Initialize Supabase client
+    let supabase = null;
+    try {
+      if (window.supabase && SUPABASE_URL !== 'https://your-project-ref.supabase.co') {
+        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      }
+    } catch (error) {
+      console.warn('Supabase initialization failed:', error);
+    }
+
+    // ---- Database Functions ----
+    const loadProductsFromDatabase = async () => {
+      if (!supabase) return [];
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .select('*')
+          .order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        return data || [];
+      } catch (error) {
+        console.error('Failed to load products:', error);
+        return [];
+      }
+    };
+
+    const saveProductToDatabase = async (product) => {
+      if (!supabase) return null;
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .insert([{
+            id: product.id,
+            name: product.name,
+            sku: product.sku,
+            price: product.price,
+            description: product.description,
+            images: product.images,
+            specs: product.specs,
+            categories: product.categories,
+            created_at: new Date().toISOString()
+          }])
+          .select()
+          .single();
+
+        if (error) throw error;
+        return data;
+      } catch (error) {
+        console.error('Failed to save product:', error);
+        return null;
+      }
+    };
+
+    const deleteProductFromDatabase = async (productId) => {
+      if (!supabase) return false;
+      try {
+        const { error } = await supabase
+          .from('products')
+          .delete()
+          .eq('id', productId);
+
+        if (error) throw error;
+        return true;
+      } catch (error) {
+        console.error('Failed to delete product:', error);
+        return false;
+      }
+    };
+
+    // Real-time subscription for product updates
+    const subscribeToProductChanges = (callback) => {
+      if (!supabase) return null;
+      try {
+        const subscription = supabase
+          .channel('products')
+          .on('postgres_changes', 
+            { event: '*', schema: 'public', table: 'products' },
+            callback
+          )
+          .subscribe();
+        
+        return subscription;
+      } catch (error) {
+        console.error('Failed to subscribe to product changes:', error);
+        return null;
+      }
+    };
 
     const CATEGORIES = [
       "All",
@@ -344,12 +464,107 @@
       return { items, add, updateQty, removeIndex, clear, subtotal, notes, setNotes };
     }
 
-    // ---- Owner products ----
+    // ---- Owner products with Supabase integration ----
     function useOwnerProducts(){
       const [ownerProducts, setOwnerProducts] = useState(/** @type Product[] */([]));
-      useEffect(()=>{ try{ const raw = localStorage.getItem(OWNER_STORAGE_KEY); if(raw){ const arr = JSON.parse(raw); if(Array.isArray(arr)) setOwnerProducts(arr); } }catch{} },[]);
-      useEffect(()=>{ try{ localStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(ownerProducts)); }catch{} },[ownerProducts]);
-      return { ownerProducts, setOwnerProducts };
+      const [loading, setLoading] = useState(true);
+
+      // Load products from database on mount
+      useEffect(() => {
+        const loadProducts = async () => {
+          try {
+            const products = await loadProductsFromDatabase();
+            setOwnerProducts(products);
+          } catch (error) {
+            console.error('Failed to load products from database:', error);
+            // Fallback to localStorage
+            try {
+              const raw = localStorage.getItem(OWNER_STORAGE_KEY);
+              if (raw) {
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr)) setOwnerProducts(arr);
+              }
+            } catch {}
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        loadProducts();
+      }, []);
+
+      // Subscribe to real-time changes
+      useEffect(() => {
+        const subscription = subscribeToProductChanges((payload) => {
+          console.log('Real-time product change:', payload);
+          
+          if (payload.eventType === 'INSERT') {
+            setOwnerProducts(prev => [payload.new, ...prev]);
+          } else if (payload.eventType === 'DELETE') {
+            setOwnerProducts(prev => prev.filter(p => p.id !== payload.old.id));
+          } else if (payload.eventType === 'UPDATE') {
+            setOwnerProducts(prev => prev.map(p => p.id === payload.new.id ? payload.new : p));
+          }
+        });
+
+        return () => {
+          if (subscription) subscription.unsubscribe();
+        };
+      }, []);
+
+      // Enhanced setOwnerProducts that saves to database
+      const setOwnerProductsWithDB = async (newProducts) => {
+        if (typeof newProducts === 'function') {
+          setOwnerProducts(prev => {
+            const updated = newProducts(prev);
+            // Save to localStorage as backup
+            try {
+              localStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
+        } else {
+          setOwnerProducts(newProducts);
+          // Save to localStorage as backup
+          try {
+            localStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(newProducts));
+          } catch {}
+        }
+      };
+
+      // Add product function
+      const addProduct = async (product) => {
+        const savedProduct = await saveProductToDatabase(product);
+        if (savedProduct) {
+          // Real-time subscription will handle the state update
+          return savedProduct;
+        } else {
+          // Fallback to local state update
+          setOwnerProductsWithDB(prev => [product, ...prev]);
+          return product;
+        }
+      };
+
+      // Delete product function
+      const deleteProduct = async (productId) => {
+        const success = await deleteProductFromDatabase(productId);
+        if (success) {
+          // Real-time subscription will handle the state update
+          return true;
+        } else {
+          // Fallback to local state update
+          setOwnerProductsWithDB(prev => prev.filter(p => p.id !== productId));
+          return false;
+        }
+      };
+
+      return { 
+        ownerProducts, 
+        setOwnerProducts: setOwnerProductsWithDB, 
+        addProduct,
+        deleteProduct,
+        loading 
+      };
     }
 
     // ---- Icon Components ----
@@ -1483,7 +1698,7 @@
       const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
       const [ownerMode, setOwnerMode] = useState(false);
       const cart = useCart();
-      const { ownerProducts, setOwnerProducts } = useOwnerProducts();
+      const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading } = useOwnerProducts();
 
       // Merge base CATALOG with owner overrides/hides
       const allProducts = useMemo(() => {
@@ -1519,8 +1734,8 @@
         return filtered;
       }, [allProducts, category, search]);
 
-      const addProduct = (product) => setOwnerProducts(prev => [...prev, product]);
-      const removeProduct = (id) => setOwnerProducts(prev => prev.filter(p => p.id !== id));
+      // Functions already provided by useOwnerProducts hook
+      const removeProduct = deleteProduct; // Alias for compatibility
 
       // expose owner manager setter globally
       useEffect(()=> { window.__setOwnerManage = setOwnerManage; return ()=> { window.__setOwnerManage = undefined; }; }, []);
@@ -1545,9 +1760,19 @@
         upsertOwner({ id: newId, sourceId: baseId, hidden: true, name: "", sku: "", category: "All", price: 0, description: "", specs: [] });
       };
 
-      const deleteOwnerProduct = (id) => setOwnerProducts(prev => prev.filter(p => p.id === id ? false : true));
+      const deleteOwnerProduct = deleteProduct;
 
   const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
+
+      // Show loading state while products are loading
+      if (loading) {
+        return React.createElement('div', { className: 'min-h-screen bg-slate-50 flex items-center justify-center' },
+          React.createElement('div', { className: 'text-center' },
+            React.createElement('div', { className: 'animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4' }),
+            React.createElement('p', { className: 'text-gray-600' }, 'Loading products...')
+          )
+        );
+      }
 
       return React.createElement('div', { className: 'min-h-screen bg-slate-50' },
         React.createElement(SkipLink),
