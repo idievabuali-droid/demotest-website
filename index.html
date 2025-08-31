@@ -93,7 +93,9 @@
     //   category text NOT NULL,
     //   price decimal NOT NULL,
     //   description text,
+    //   images jsonb DEFAULT '[]'::jsonb,
     //   specs jsonb DEFAULT '[]'::jsonb,
+    //   variants jsonb,
     //   sourceId text,
     //   hidden boolean DEFAULT false,
     //   created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
@@ -145,12 +147,15 @@
             id: product.id,
             name: product.name,
             sku: product.sku,
+            category: product.category,            // ← correct field name
             price: product.price,
             description: product.description,
-            images: product.images,
-            specs: product.specs,
-            categories: product.categories,
-            created_at: new Date().toISOString()
+            images: product.images ?? (product.image ? [product.image] : null),
+            specs: product.specs ?? [],
+            variants: product.variants ?? null,
+            sourceId: product.sourceId ?? null,
+            hidden: product.hidden ?? false
+            // created_at is set by default in the DB
           }])
           .select()
           .single();
@@ -159,6 +164,22 @@
         return data;
       } catch (error) {
         console.error('Failed to save product:', error);
+        return null;
+      }
+    };
+
+    const upsertProductToDatabase = async (product) => {
+      if (!supabase) return null;
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .upsert([product], { onConflict: 'id' })
+          .select()
+          .single();
+        if (error) throw error;
+        return data;
+      } catch (error) {
+        console.error('Failed to upsert product:', error);
         return null;
       }
     };
@@ -1746,12 +1767,16 @@
         return [...prev, p];
       });
 
-      const saveEdit = (edited, baseId) => {
-        if (edited.id && String(edited.id).startsWith('owner-')) {
-          upsertOwner(edited);
-        } else {
-          const newId = `owner-${Date.now()}`;
-          upsertOwner({ ...edited, id: newId, sourceId: baseId || edited.id });
+      const saveEdit = async (edited, baseId) => {
+        // Ensure an id for new overrides
+        const withId = edited.id
+          ? edited
+          : { ...edited, id: `owner-${Date.now()}`, sourceId: baseId || edited.id };
+        // Persist to DB; realtime subscription will update state everywhere
+        const saved = await upsertProductToDatabase(withId);
+        if (!saved) {
+          // Fallback to local UI if DB fails (won't sync across devices)
+          upsertOwner(withId);
         }
       };
 
