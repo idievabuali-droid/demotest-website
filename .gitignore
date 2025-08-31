@@ -4,3 +4,6 @@ node_modules/
 *.log
 *.zip
 old_site_backup_*
+
+# Local Netlify folder
+.netlify
