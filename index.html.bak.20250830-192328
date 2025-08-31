@@ -207,6 +207,7 @@
         sku: "CA-IP-TPU",
         category: "Phone Cases",
         price: 3.9,
+        minOrder: 10,
         specs: ["TPU", "Slim", "Matte"],
         description: "Slim matte TPU case.",
   image: "Изображение WhatsApp 2025-08-16 в 15.37.09_811264ed.jpg",
@@ -458,7 +459,8 @@
             (product.specs||[]).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'rounded-full border border-gray-300 bg-gray-50 px-2 py-0.5 text-xs text-gray-700' }, s))
           ),
           React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
-            React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(product.price))
+            React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(product.price)),
+            product.minOrder && React.createElement('span', { className: 'text-xs text-gray-500' }, 'MOQ ', product.minOrder)
           ),
           React.createElement('div', null,
             React.createElement('button', { onClick: onOpen, className: 'w-full rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'View details')
@@ -468,226 +470,128 @@
     }
 
     function ProductModal({ product, onClose, onAdd }){
+      const [qty, setQty] = useState(0);
+      const [selections, setSelections] = useState(/** @type Record<string,string> */({}));
+      const [galleryIndex, setGalleryIndex] = useState(0);
+      const [modelQty, setModelQty] = useState({}); // { [modelName]: number }
       const ref = useRef(null);
       useFocusTrap(!!product, ref, onClose);
-
-      // base variant selections (for everything except Model/Color)
-      const [baseSelections, setBaseSelections] = useState({});
-      // filters (which models/colors are active)
-      const [activeModels, setActiveModels] = useState([]);
-      const [activeColors, setActiveColors] = useState([]);
-      // quantity per combination (keys like "Model|Color", "Model|", "|Color")
-      const [qtyMap, setQtyMap] = useState({}); // { "iPhone 12|Red": 0, ... }
-
       useEffect(()=>{
-        if (!product) return;
-        // init base selections from other variant dimensions
-        const initBase = {};
-        const v = product.variants || {};
-        Object.entries(v).forEach(([k, arr])=>{
-          if (k !== 'Model' && k !== 'Color' && Array.isArray(arr) && arr.length) {
-            initBase[k] = arr[0];
-          }
-        });
-        setBaseSelections(initBase);
-
-        // default all models/colors to selectable, quantities to 0
-        const models = Array.isArray(v.Model) ? v.Model : null;
-        const colors = Array.isArray(v.Color) ? v.Color : null;
-        setActiveModels(models || []);
-        setActiveColors(colors || []);
-        const next = {};
-        if (models && colors) {
-          models.forEach(m => colors.forEach(c => { next[`${m}|${c}`] = 0; }));
-        } else if (models) {
-          models.forEach(m => { next[`${m}|`] = 0; });
-        } else if (colors) {
-          colors.forEach(c => { next[`|${c}`] = 0; });
-        } else {
-          // no model/color → single quantity
-          next["|"] = 0;
+        if(product?.variants){ const initial = Object.fromEntries(Object.entries(product.variants).map(([k,v])=>[k, v[0]])); setSelections(initial);} else { setSelections({}); }
+        setQty(0);
+        setGalleryIndex(0);
+        if (product?.variants?.Model) {
+          const init = {};
+          product.variants.Model.forEach(m => { init[m] = 0; });
+          setModelQty(init);
         }
-        setQtyMap(next);
-      }, [product]);
-
+      },[product]);
       if(!product) return null;
+      const lineTotal = product.price * qty;
+      const modelOptions = product.variants && Array.isArray(product.variants.Model) ? product.variants.Model : null;
+      const totalModelQty = modelOptions ? Object.values(modelQty).reduce((a,b)=> a + (Number(b)||0), 0) : 0;
+      const disabled = modelOptions
+        ? totalModelQty <= 0
+        : (qty <= 0 || (product.minOrder ? qty < product.minOrder : false));
 
-      const v = product.variants || {};
-      const models = Array.isArray(v.Model) ? v.Model : null;
-      const colors = Array.isArray(v.Color) ? v.Color : null;
-
-      // helpers
-      const setAllModels = () => setActiveModels(models || []);
-      const clearModels  = () => setActiveModels([]);
-      const toggleModel  = (m) => setActiveModels(prev => prev.includes(m) ? prev.filter(x=>x!==m) : [...prev, m]);
-
-      const setAllColors = () => setActiveColors(colors || []);
-      const clearColors  = () => setActiveColors([]);
-      const toggleColor  = (c) => setActiveColors(prev => prev.includes(c) ? prev.filter(x=>x!==c) : [...prev, c]);
-
-      const setQty = (key, value) => setQtyMap(prev => ({ ...prev, [key]: Math.max(0, Number(value)||0) }));
-
-      // compute gallery images
-      const images = (() => {
-        const list = Array.isArray(product.images) && product.images.length ? product.images
-          : (product.image ? [product.image] : []);
-        return list.length ? list : [buildPlaceholderDataURI(product.name)];
-      })().map(src => resolveImageSrc(src, product.name));
-
-      const minOrder = 0;
-
-      // Build combinations visible right now
-      const combos = (() => {
-        if (models && colors) {
-          return activeModels.flatMap(m => activeColors.map(c => ({ key: `${m}|${c}`, m, c })));
-        } else if (models) {
-          return activeModels.map(m => ({ key: `${m}|`, m, c: null }));
-        } else if (colors) {
-          return activeColors.map(c => ({ key: `|${c}`, m: null, c }));
-        }
-        return [{ key: '|', m: null, c: null }];
-      })();
-
-      // Add to cart
-      const onAddAll = () => {
-        let any = false;
-        combos.forEach(({ key, m, c }) => {
-          const q = Number(qtyMap[key] || 0);
-          if (q > 0) {
-            const variants = { ...baseSelections };
-            if (m) variants.Model = m;
-            if (c) variants.Color = c;
-            onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: q, variants });
-            any = true;
-          }
-        });
-        if (any) onClose();
-      };
-
-      // Disabled if nothing selected with qty > 0
-      const disabled = combos.every(({ key }) => Number(qtyMap[key]||0) <= 0);
-
-      // UI
-      return (
-        React.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `product-title-${product.id}`, className: 'fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-6' },
-          React.createElement('div', { ref: ref, className: 'w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl bg-white shadow-lg outline-none max-h-[90vh] overflow-y-auto' },
-            /* header */
-            React.createElement('div', { className: 'p-4 border-b border-gray-200 flex items-center justify-between' },
+      const images = getProductImages(product).map(img => resolveImageSrc(img, product.name));
+      const prevImg = () => setGalleryIndex(i => (i-1+images.length)%images.length);
+      const nextImg = () => setGalleryIndex(i => (i+1)%images.length);
+      return React.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `product-title-${product.id}`, className: 'fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-6' },
+        React.createElement('div', { ref: ref, className: 'w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl bg-white shadow-lg outline-none' },
+          React.createElement('div', { className: 'p-4 border-b border-gray-200' },
+            React.createElement('div', { className: 'flex items-center justify-between' },
               React.createElement('h3', { id: `product-title-${product.id}`, className: 'text-lg font-semibold text-gray-900' }, product.name),
-              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' }, React.createElement(XIcon, { className: 'h-5 w-5' }))
-            ),
-
-            React.createElement('div', { className: 'grid gap-4 p-4 sm:grid-cols-2' },
-              /* left: image (simple) */
-              React.createElement('div', { className: 'flex flex-col gap-2' },
-                React.createElement('div', { className: 'relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-gray-100' },
-                  React.createElement('img', { src: images[0], onError: (e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }, alt: `${product.name} – photo`, className: 'h-full w-full object-cover' })
+              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' },
+                React.createElement(XIcon, { className: 'h-5 w-5' })
+              )
+            )
+          ),
+          React.createElement('div', { className: 'grid gap-4 p-4 sm:grid-cols-2' },
+            React.createElement('div', { className: 'flex flex-col gap-2' },
+              React.createElement('div', { className: 'relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-gray-100' },
+                React.createElement('img', { src: images[galleryIndex], onError: (e)=>{ (e.currentTarget).src = buildPlaceholderDataURI(product.name); }, alt: `${product.name} – photo ${galleryIndex+1} of ${images.length}`, className: 'h-full w-full object-cover' }),
+                images.length > 1 && React.createElement(React.Fragment, null,
+                  React.createElement('button', { type: 'button', onClick: prevImg, className: 'absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-white/90 p-2 shadow focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Previous photo' }, '‹'),
+                  React.createElement('button', { type: 'button', onClick: nextImg, className: 'absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-white/90 p-2 shadow focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Next photo' }, '›')
                 )
               ),
-
-              /* right: details */
-              React.createElement('div', { className: 'flex min-w-0 flex-col gap-3' },
-                React.createElement('p', { className: 'text-sm text-gray-600' }, product.description),
-
-                /* base (non model/color) variants */
-                !!v && (
-                  React.createElement('div', { className: 'space-y-2', 'aria-label': 'Variants' },
-                    Object.entries(v).filter(([label]) => label!=='Model' && label!=='Color').map(([label, options])=> (
-                      React.createElement('label', { key: label, className: 'block text-sm' },
-                        React.createElement('span', { className: 'mb-1 block text-gray-700' }, label),
-                        React.createElement('select', {
-                          value: baseSelections[label] || options[0],
-                          onChange: (e)=> setBaseSelections(s => ({ ...s, [label]: e.target.value })),
-                          className: 'w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600'
-                        }, options.map(opt => React.createElement('option', { key: opt, value: opt }, opt)))
-                      )
-                    ))
-                  )
-                ),
-
-                /* model filter */
-                models && (
-                  React.createElement('div', { className: 'text-sm' },
-                    React.createElement('div', { className: 'mb-1 flex items-center justify-between' },
-                      React.createElement('span', { className: 'text-gray-700' }, 'Models'),
-                      React.createElement('div', { className: 'flex items-center gap-2' },
-                        React.createElement('button', { type: 'button', onClick: setAllModels, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Select all'),
-                        React.createElement('button', { type: 'button', onClick: clearModels, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Clear')
-                      )
-                    ),
-                    React.createElement('div', { className: 'max-h-32 overflow-auto rounded-md border p-2' },
-                      React.createElement('div', { className: 'flex flex-wrap gap-1.5' },
-                        models.map(m => {
-                          const on = activeModels.includes(m);
-                          return (
-                            React.createElement('button', { type: 'button', key: m, onClick: ()=> toggleModel(m),
-                              className: cx('rounded-full border px-2 py-1', on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') }, m)
-                          );
-                        })
-                      )
-                    )
-                  )
-                ),
-
-                /* color filter */
-                colors && (
-                  React.createElement('div', { className: 'text-sm' },
-                    React.createElement('div', { className: 'mb-1 flex items-center justify-between' },
-                      React.createElement('span', { className: 'text-gray-700' }, 'Colors'),
-                      React.createElement('div', { className: 'flex items-center gap-2' },
-                        React.createElement('button', { type: 'button', onClick: setAllColors, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Select all'),
-                        React.createElement('button', { type: 'button', onClick: clearColors, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Clear')
-                      )
-                    ),
-                    React.createElement('div', { className: 'flex flex-wrap gap-1.5' },
-                      colors.map(c => {
-                        const on = activeColors.includes(c);
-                        return (
-                          React.createElement('button', { type: 'button', key: c, onClick: ()=> toggleColor(c),
-                            className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-1',
-                              on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') },
-                            React.createElement(ColorDot, { name: c}), ' ', c
+              images.length > 1 && React.createElement('div', { className: 'flex gap-2 overflow-x-auto' },
+                images.map((src, i)=> React.createElement('button', { type: 'button', key: i, onClick: ()=> setGalleryIndex(i), className: cx('h-14 w-20 flex-shrink-0 overflow-hidden rounded-md border', i===galleryIndex ? 'border-indigo-600' : 'border-gray-200'), 'aria-label': `Show photo ${i+1}` }, React.createElement('img', { src: src, alt: '', className: 'h-full w-full object-cover' })))
+              )
+            ),
+            React.createElement('div', { className: 'flex min-w-0 flex-col gap-3' },
+              React.createElement('p', { className: 'text-sm text-gray-600' }, product.description),
+              product.variants && React.createElement('div', { className: 'space-y-2', 'aria-label': 'Variants' },
+                Object.entries(product.variants).filter(([label]) => label !== 'Model').map(([label, options])=> React.createElement('label', { key: label, className: 'block text-sm' },
+                  React.createElement('span', { className: 'mb-1 block text-gray-700' }, label),
+                  React.createElement('select', {
+                    value: selections[label] || options[0],
+                    onChange: (e)=> setSelections((s)=> ({...s, [label]: e.target.value})),
+                    className: 'w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600'
+                  }, options.map((opt)=> React.createElement('option', { key: opt, value: opt }, opt))),
+                  label === 'Color' && React.createElement('div', { className: 'mt-1 text-xs text-gray-600 inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: selections[label] || options[0] }), React.createElement('span', null, selections[label] || options[0]))
+                ))
+              ),
+              modelOptions && React.createElement(React.Fragment, null,
+                React.createElement('div', { className: 'mt-1 space-y-2', 'aria-label': 'Order by model' },
+                  React.createElement('div', { className: 'text-sm font-medium text-gray-900' }, 'Models'),
+                  React.createElement('div', { className: 'max-h-40 overflow-auto rounded-md border' },
+                    React.createElement('table', { className: 'w-full text-sm' },
+                      React.createElement('thead', { className: 'sticky top-0 bg-gray-50' },
+                        React.createElement('tr', null,
+                          React.createElement('th', { className: 'px-2 py-1 text-left font-medium text-gray-700' }, 'Model'),
+                          React.createElement('th', { className: 'px-2 py-1 text-right font-medium text-gray-700' }, 'Qty')
+                        )
+                      ),
+                      React.createElement('tbody', null,
+                        modelOptions.map(m => React.createElement('tr', { key: m, className: 'border-t' },
+                          React.createElement('td', { className: 'px-2 py-1' }, m),
+                          React.createElement('td', { className: 'px-2 py-1 text-right' },
+                            React.createElement(NumberStepper, { value: Number(modelQty[m]||0), onChange: (v)=> setModelQty(prev => ({ ...prev, [m]: v })), min: product.minOrder ? product.minOrder : 0 })
                           )
-                        );
-                      })
-                    )
-                  )
-                ),
-
-                /* quantities by combination (mobile-friendly list) */
-                React.createElement('div', { className: 'mt-1 space-y-2', 'aria-label': 'Quantities' },
-                  combos.length === 0 ? (
-                    React.createElement('p', { className: 'text-xs text-gray-600' }, 'Select at least one model/color.')
-                  ) : (
-                    combos.map(({ key, m, c }) => (
-                      React.createElement('div', { key: key, className: 'flex items-center justify-between rounded-lg border p-2' },
-                        React.createElement('div', { className: 'text-sm text-gray-800' },
-                          m && React.createElement('span', { className: 'font-medium' }, m),
-                          m && c ? ' — ' : '',
-                          c && React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: c}), c),
-                          !m && !c && React.createElement('span', { className: 'font-medium' }, 'Quantity')
-                        ),
-                        React.createElement(NumberStepper, { value: Number(qtyMap[key]||0), onChange: (v)=> setQty(key, Math.max(0, v)), min: 0 })
+                        ))
                       )
-                    ))
-                  )
-                ),
-
-                /* price/min order summary */
-                React.createElement('dl', { className: 'mt-1 grid grid-cols-1 gap-2 text-sm' },
-                  React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' },
-                    React.createElement('dt', { className: 'text-gray-500' }, 'Unit price'),
-                    React.createElement('dd', { className: 'font-semibold text-gray-900' }, fmt(product.price))
-                  )
-                ),
-
-                /* actions */
-                React.createElement('div', { className: 'mt-2 flex gap-3' },
-                  React.createElement('button', { onClick: onClose, className: 'flex-1 rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'Cancel'),
-                  React.createElement('button', { disabled: disabled, onClick: onAddAll,
-                    className: cx("flex-1 rounded-full px-4 py-2 text-sm font-medium text-white shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600",
-                      disabled ? "bg-indigo-300 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700") }, 'Add to cart')
+                    )
+                  ),
+                  React.createElement('div', { className: 'text-xs text-gray-600' }, 'Total items: ', React.createElement('span', { className: 'font-medium text-gray-900' }, String(Object.values(modelQty).reduce((a,b)=> a + (Number(b)||0), 0))))
                 )
+              ),
+              React.createElement('dl', { className: 'mt-1 grid grid-cols-2 gap-2 text-sm' },
+                React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' },
+                  React.createElement('dt', { className: 'text-gray-500' }, 'Unit price'),
+                  React.createElement('dd', { className: 'font-semibold text-gray-900' }, fmt(product.price))
+                ),
+                React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' },
+                  React.createElement('dt', { className: 'text-gray-500' }, 'Min order'),
+                  React.createElement('dd', { className: 'font-semibold text-gray-900' }, product.minOrder ? product.minOrder : 0)
+                )
+              ),
+              !modelOptions && React.createElement('div', { className: 'mt-1 flex items-center gap-2' },
+                React.createElement('label', { className: 'text-sm text-gray-700', htmlFor: `qty-${product.id}` }, 'Quantity'),
+                React.createElement(NumberStepper, { id: `qty-${product.id}`, value: qty, onChange: setQty, min: 0 }),
+                React.createElement('div', { className: 'ml-auto text-sm text-gray-600' }, 'Total: ', React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(lineTotal)))
+              ),
+              React.createElement('div', { className: 'mt-auto flex gap-3 pt-2' },
+                React.createElement('button', { onClick: onClose, className: 'flex-1 rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'Cancel'),
+                React.createElement('button', {
+                  disabled: disabled,
+                  onClick: ()=>{
+                    if (modelOptions) {
+                      const base = Object.fromEntries(Object.entries(selections || {}).filter(([k])=> k !== 'Model'));
+                      modelOptions.forEach(m => {
+                        const q = Number(modelQty[m]||0);
+                        if (q > 0) {
+                          onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: q, variants: { ...base, Model: m } });
+                        }
+                      });
+                    } else {
+                      onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty, variants: selections });
+                    }
+                    onClose();
+                  },
+                  className: cx("flex-1 rounded-full px-4 py-2 text-sm font-medium text-white shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600", disabled?"bg-indigo-300 cursor-not-allowed":"bg-indigo-600 hover:bg-indigo-700")
+                }, 'Add to cart')
               )
             )
           )
@@ -776,7 +680,7 @@
                 React.createElement('button', {
                   type: 'button',
                   onClick: ()=>{
-                    if (!hasQty) return;
+                    if (cart.items.every(it => Number(it.qty) <= 0)) return; // nothing to send
                     if (isMobile) {
                       // Try to open the native app
                       window.location.href = waDeep;
@@ -789,7 +693,7 @@
                   },
                   className: cx(
                     "flex-1 inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-white shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600",
-                    hasQty ? "bg-indigo-600 hover:bg-indigo-700" : "pointer-events-none bg-indigo-300"
+                    cart.items.length===0 ? "pointer-events-none bg-indigo-300" : "bg-indigo-600 hover:bg-indigo-700"
                   )
                 },
                   'Send via WhatsApp',
@@ -1483,7 +1387,7 @@
 
       const deleteOwnerProduct = (id) => setOwnerProducts(prev => prev.filter(p => p.id === id ? false : true));
 
-  const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
+  const cartQty = cart.items.reduce((sum, it) => sum + it.qty, 0);
 
       return React.createElement('div', { className: 'min-h-screen bg-slate-50' },
         React.createElement(SkipLink),

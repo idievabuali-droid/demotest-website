@@ -10,6 +10,11 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Optional Supabase client (used only if you add meta tags for URL + anon key) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js"></script>
+  <!-- Add your Supabase project info here (replace with real values) -->
+  <meta name="supabase-url" content="https://bslehhvvtyxxpbgddcbt.supabase.co">
+  <meta name="supabase-key" content="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzbGVoaHZ2dHl4eHBiZ2RkY2J0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1NjYxMjMsImV4cCI6MjA3MjE0MjEyM30.-b5qm72nssT5CVeb3BdLyP8k-7cE_ZyGq5MC3Ilirmk">
   <style>
     :root {
       --ring: 0 0 0 calc(3px + var(--tw-ring-offset-width, 0px)) var(--tw-ring-color, rgb(59 130 246 / var(--tw-ring-opacity, 0.5)));
@@ -94,6 +99,23 @@
       "Charging Ports",
       "Face ID",
     ];
+
+    // ---- Supabase runtime (optional) ----
+    // To enable persistent, shared owner products across users, add these meta tags
+    // to the <head> with values from your Supabase project:
+    // <meta name="supabase-url" content="https://xyzcompany.supabase.co">
+    // <meta name="supabase-key" content="public-anon-key-or-service-role-key">
+    const __SUPABASE_URL = document.querySelector('meta[name="supabase-url"]')?.content || '';
+    const __SUPABASE_KEY = document.querySelector('meta[name="supabase-key"]')?.content || '';
+    let SUPABASE_CLIENT = null;
+    if (__SUPABASE_URL && __SUPABASE_KEY && window.supabase) {
+      try {
+        SUPABASE_CLIENT = window.supabase.createClient(__SUPABASE_URL, __SUPABASE_KEY);
+        console.info('Supabase client initialized');
+      } catch (e) { console.warn('Failed to init Supabase client', e); SUPABASE_CLIENT = null; }
+    } else {
+      if(!__SUPABASE_URL && !__SUPABASE_KEY) console.info('Supabase not configured: add meta tags supabase-url and supabase-key to <head> to enable shared persistence');
+    }
 
     // --- Shared option lists (unified) ---
     // Models
@@ -207,6 +229,7 @@
         sku: "CA-IP-TPU",
         category: "Phone Cases",
         price: 3.9,
+        minOrder: 10,
         specs: ["TPU", "Slim", "Matte"],
         description: "Slim matte TPU case.",
   image: "Изображение WhatsApp 2025-08-16 в 15.37.09_811264ed.jpg",
@@ -347,8 +370,56 @@
     // ---- Owner products ----
     function useOwnerProducts(){
       const [ownerProducts, setOwnerProducts] = useState(/** @type Product[] */([]));
-      useEffect(()=>{ try{ const raw = localStorage.getItem(OWNER_STORAGE_KEY); if(raw){ const arr = JSON.parse(raw); if(Array.isArray(arr)) setOwnerProducts(arr); } }catch{} },[]);
-      useEffect(()=>{ try{ localStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(ownerProducts)); }catch{} },[ownerProducts]);
+
+      // Load — prefer Supabase when configured
+      useEffect(()=>{
+        let mounted = true;
+        async function load(){
+          if (SUPABASE_CLIENT) {
+            try {
+              const { data, error } = await SUPABASE_CLIENT.from('owner_products').select('*');
+              if (error) throw error;
+              if (!mounted) return;
+              // ensure parsed specs/variants where stored as JSON
+              const parsed = (data || []).map(d => ({ ...d, specs: d.specs ? JSON.parse(d.specs) : [], variants: d.variants ? JSON.parse(d.variants) : undefined, images: d.images ? JSON.parse(d.images) : undefined }));
+              setOwnerProducts(parsed);
+              return;
+            } catch (err) { console.warn('Supabase load failed, falling back to localStorage', err); }
+          }
+          try{ const raw = localStorage.getItem(OWNER_STORAGE_KEY); if(raw){ const arr = JSON.parse(raw); if(Array.isArray(arr)) setOwnerProducts(arr); } }catch(e){/*ignore*/}
+        }
+        load();
+        return ()=>{ mounted = false; };
+      },[]);
+
+      // Persist — push to Supabase when available, otherwise localStorage
+      useEffect(()=>{
+        let mounted = true;
+        if (SUPABASE_CLIENT) {
+          // sync each product with upsert
+          (async ()=>{
+            try{
+              // delete all remote entries not present locally
+              const remote = await SUPABASE_CLIENT.from('owner_products').select('id');
+              if (remote.error) throw remote.error;
+              const remoteIds = new Set((remote.data||[]).map(r => r.id));
+              const localIds = new Set(ownerProducts.map(p => p.id));
+              const toDelete = [...remoteIds].filter(id => !localIds.has(id));
+              for(const id of toDelete){ await SUPABASE_CLIENT.from('owner_products').delete().eq('id', id); }
+
+              // upsert current
+              for(const p of ownerProducts){
+                const row = { ...p, specs: JSON.stringify(p.specs||[]), variants: p.variants ? JSON.stringify(p.variants) : null, images: p.images ? JSON.stringify(p.images) : null };
+                await SUPABASE_CLIENT.from('owner_products').upsert(row, { onConflict: 'id' });
+              }
+            }catch(err){ console.warn('Supabase save failed', err); }
+          })();
+        } else {
+          try{ localStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(ownerProducts)); }catch(e){/*ignore*/}
+        }
+        return ()=>{ mounted=false };
+      },[ownerProducts]);
+
       return { ownerProducts, setOwnerProducts };
     }
 
@@ -458,7 +529,8 @@
             (product.specs||[]).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'rounded-full border border-gray-300 bg-gray-50 px-2 py-0.5 text-xs text-gray-700' }, s))
           ),
           React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
-            React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(product.price))
+            React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(product.price)),
+            product.minOrder && React.createElement('span', { className: 'text-xs text-gray-500' }, 'MOQ ', product.minOrder)
           ),
           React.createElement('div', null,
             React.createElement('button', { onClick: onOpen, className: 'w-full rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'View details')
@@ -534,7 +606,7 @@
         return list.length ? list : [buildPlaceholderDataURI(product.name)];
       })().map(src => resolveImageSrc(src, product.name));
 
-      const minOrder = 0;
+      const minOrder = product.minOrder ? Number(product.minOrder) : 0;
 
       // Build combinations visible right now
       const combos = (() => {
@@ -570,11 +642,13 @@
       // UI
       return (
         React.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `product-title-${product.id}`, className: 'fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-0 sm:p-6' },
-          React.createElement('div', { ref: ref, className: 'w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl bg-white shadow-lg outline-none max-h-[90vh] overflow-y-auto' },
+          React.createElement('div', { ref: ref, className: 'w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl bg-white shadow-lg outline-none' },
             /* header */
             React.createElement('div', { className: 'p-4 border-b border-gray-200 flex items-center justify-between' },
               React.createElement('h3', { id: `product-title-${product.id}`, className: 'text-lg font-semibold text-gray-900' }, product.name),
-              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' }, React.createElement(XIcon, { className: 'h-5 w-5' }))
+              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' },
+                React.createElement(XIcon, { className: 'h-5 w-5' })
+              )
             ),
 
             React.createElement('div', { className: 'grid gap-4 p-4 sm:grid-cols-2' },
@@ -620,8 +694,7 @@
                         models.map(m => {
                           const on = activeModels.includes(m);
                           return (
-                            React.createElement('button', { type: 'button', key: m, onClick: ()=> toggleModel(m),
-                              className: cx('rounded-full border px-2 py-1', on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') }, m)
+                            React.createElement('button', { type: 'button', key: m, onClick:()=> toggleModel(m), className: cx('rounded-full border px-2 py-1', on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') }, m)
                           );
                         })
                       )
@@ -643,9 +716,7 @@
                       colors.map(c => {
                         const on = activeColors.includes(c);
                         return (
-                          React.createElement('button', { type: 'button', key: c, onClick: ()=> toggleColor(c),
-                            className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-1',
-                              on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') },
+                          React.createElement('button', { type: 'button', key: c, onClick:()=> toggleColor(c), className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-1', on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') },
                             React.createElement(ColorDot, { name: c}), ' ', c
                           )
                         );
@@ -667,31 +738,26 @@
                           c && React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: c}), c),
                           !m && !c && React.createElement('span', { className: 'font-medium' }, 'Quantity')
                         ),
-                        React.createElement(NumberStepper, { value: Number(qtyMap[key]||0), onChange: (v)=> setQty(key, Math.max(0, v)), min: 0 })
+                        React.createElement(NumberStepper, { value: Number(qtyMap[key]||0), onChange: (v)=> setQty(key, Math.max(minOrder?minOrder:0, v)), min: 0 })
                       )
                     ))
                   )
                 ),
 
                 /* price/min order summary */
-                React.createElement('dl', { className: 'mt-1 grid grid-cols-1 gap-2 text-sm' },
-                  React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' },
-                    React.createElement('dt', { className: 'text-gray-500' }, 'Unit price'),
-                    React.createElement('dd', { className: 'font-semibold text-gray-900' }, fmt(product.price))
-                  )
+                React.createElement('dl', { className: 'mt-1 grid grid-cols-2 gap-2 text-sm' },
+                  React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' }, React.createElement('dt', { className: 'text-gray-500' }, 'Unit price'), React.createElement('dd', { className: 'font-semibold text-gray-900' }, fmt(product.price))),
+                  React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' }, React.createElement('dt', { className: 'text-gray-500' }, 'Min order'), React.createElement('dd', { className: 'font-semibold text-gray-900' }, minOrder || 0))
                 ),
 
                 /* actions */
                 React.createElement('div', { className: 'mt-2 flex gap-3' },
                   React.createElement('button', { onClick: onClose, className: 'flex-1 rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'Cancel'),
-                  React.createElement('button', { disabled: disabled, onClick: onAddAll,
-                    className: cx("flex-1 rounded-full px-4 py-2 text-sm font-medium text-white shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600",
-                      disabled ? "bg-indigo-300 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700") }, 'Add to cart')
+                  React.createElement('button', { disabled: disabled, onClick: onAddAll, className: cx('flex-1 rounded-full px-4 py-2 text-sm font-medium text-white shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', disabled ? 'bg-indigo-300 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700') }, 'Add to cart')
                 )
               )
             )
           )
-        )
       );
     }
 
@@ -778,12 +844,11 @@
                   onClick: ()=>{
                     if (!hasQty) return;
                     if (isMobile) {
-                      // Try to open the native app
+                      // Try native app first
                       window.location.href = waDeep;
-                      // Fallback to web if app didn’t catch it
+                      // Fallback to WA Web if the app didn’t catch it
                       setTimeout(()=>{ window.open(waWeb, "_blank", "noopener,noreferrer"); }, 700);
                     } else {
-                      // Desktop → WhatsApp Web
                       window.open(waWeb, "_blank", "noopener,noreferrer");
                     }
                   },
@@ -1430,7 +1495,8 @@
       const [cartOpen, setCartOpen] = useState(false);
       const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
       const [ownerMode, setOwnerMode] = useState(false);
-      const cart = useCart();
+  const cart = useCart();
+  const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
       const { ownerProducts, setOwnerProducts } = useOwnerProducts();
 
       // Merge base CATALOG with owner overrides/hides
@@ -1483,7 +1549,7 @@
 
       const deleteOwnerProduct = (id) => setOwnerProducts(prev => prev.filter(p => p.id === id ? false : true));
 
-  const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
+  // removed duplicate cartQty calculation (computed earlier)
 
       return React.createElement('div', { className: 'min-h-screen bg-slate-50' },
         React.createElement(SkipLink),
