@@ -1574,6 +1574,12 @@
   <!-- Deployment version marker -->
   <div id="build-version" class="text-center text-[10px] text-gray-400 py-6 select-none">
     Build 9348fff – deployed at <span id="build-ts"></span>
+    <button onclick="window.location.reload(true)" class="ml-4 px-2 py-1 text-[9px] bg-gray-200 hover:bg-gray-300 rounded transition-colors">
+      🔄 Force Refresh
+    </button>
+    <button onclick="navigator.share ? navigator.share({title:'Odil Accessories', url:window.location.href}) : navigator.clipboard.writeText(window.location.href).then(()=>alert('Link copied!'))" class="ml-2 px-2 py-1 text-[9px] bg-blue-200 hover:bg-blue-300 rounded transition-colors">
+      📱 Share/Copy
+    </button>
   </div>
   <script>
     (function(){
