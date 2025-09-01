@@ -932,18 +932,6 @@
       const ref = useRef(null);
       useFocusTrap(!!product, ref, onClose);
 
-      // lock background scroll when open
-      useEffect(() => {
-        const prevHtml = document.documentElement.style.overflow;
-        const prevBody = document.body.style.overflow;
-        document.documentElement.style.overflow = 'hidden';
-        document.body.style.overflow = 'hidden';
-        return () => {
-          document.documentElement.style.overflow = prevHtml;
-          document.body.style.overflow = prevBody;
-        };
-      }, [product]);
-
       // resolve images
       const images = (() => {
         const list = Array.isArray(product.images) && product.images.length ? product.images
@@ -1028,8 +1016,24 @@
       const disabled = combos.every(({ key }) => Number(qtyMap[key] || 0) <= 0);
 
       return (
-        React.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `product-title-${product.id}`, className: 'fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 p-0 sm:p-6' },
-          React.createElement('div', { ref: ref, className: 'w-full h-full sm:h-auto sm:max-w-2xl rounded-none sm:rounded-2xl bg-white shadow-lg outline-none overscroll-contain overflow-y-auto max-h-none sm:max-h-[90vh]' },
+        React.createElement('div', { 
+          role: 'dialog', 
+          'aria-modal': 'true', 
+          'aria-labelledby': `product-title-${product.id}`, 
+          className: 'fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 p-0 sm:p-6',
+          onClick: onClose,
+          onTouchMove: (e) => {
+            // Prevent momentum scrolling on the backdrop
+            if (e.target === e.currentTarget) {
+              e.preventDefault();
+            }
+          }
+        },
+          React.createElement('div', { 
+            ref: ref, 
+            className: 'w-full h-full sm:h-auto sm:max-w-2xl rounded-none sm:rounded-2xl bg-white shadow-lg outline-none overscroll-contain overflow-y-auto max-h-none sm:max-h-[90vh]',
+            onClick: (e) => e.stopPropagation()
+          },
             /* header */
             React.createElement('div', { className: 'p-4 border-b border-gray-200 flex items-center justify-between' },
               React.createElement('h3', { id: `product-title-${product.id}`, className: 'text-lg font-semibold text-gray-900' }, product.name),
@@ -1156,12 +1160,24 @@
   const waDeep = `whatsapp://send?phone=${WHATSAPP_NUMBER_E164}&text=${encodeURIComponent(message)}`;
   const isMobile = /Android|iPhone|iPad|iPod|Windows Phone/i.test(navigator.userAgent);
       return React.createElement('div', { 'aria-live': 'polite' },
-        React.createElement('div', { className: cx("fixed inset-0 z-40 bg-black/40 transition-opacity", open?"opacity-100":"pointer-events-none opacity-0"), onClick: onClose, 'aria-hidden': 'true' }),
+        React.createElement('div', { 
+          className: cx("fixed inset-0 z-40 bg-black/40 transition-opacity", open?"opacity-100":"pointer-events-none opacity-0"), 
+          onClick: onClose, 
+          onTouchMove: (e)=> {
+            // Only prevent if the touch isn't on the drawer itself
+            e.preventDefault();
+          },
+          onTouchStart: (e)=> {
+            // Prevent momentum scrolling on backdrop
+            e.preventDefault();
+          },
+          'aria-hidden': 'true' 
+        }),
         React.createElement('aside', {
           role: 'dialog',
           'aria-modal': 'true',
           'aria-labelledby': 'cart-title',
-          className: cx("fixed right-0 top-0 z-50 h-full w-full max-w-md transform bg-white shadow-xl outline-none", reduced?"transition-none":"transition-transform duration-200 ease-out", open?"translate-x-0":"translate-x-full")
+          className: cx("fixed right-0 top-0 z-50 h-full w-full max-w-md transform bg-white shadow-xl outline-none overscroll-contain", reduced?"transition-none":"transition-transform duration-200 ease-out", open?"translate-x-0":"translate-x-full")
         },
           React.createElement('div', { ref: ref, className: 'flex h-full flex-col' },
             React.createElement('div', { className: 'flex items-center justify-between border-b border-gray-200 p-4' },
@@ -1918,6 +1934,59 @@
       const [ownerMode, setOwnerMode] = useState(false);
       const cart = useCart();
       const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
+
+      // Lock page scroll whenever a modal/drawer is open (mobile-friendly)
+      useEffect(() => {
+        const lock = !!selectedProduct || !!cartOpen;
+        
+        if (lock) {
+          // Save current scroll position
+          const scrollY = window.scrollY;
+          const scrollX = window.scrollX;
+          
+          // Apply scroll lock with position preservation
+          document.body.style.position = 'fixed';
+          document.body.style.top = `-${scrollY}px`;
+          document.body.style.left = `-${scrollX}px`;
+          document.body.style.width = '100%';
+          document.body.style.height = '100%';
+          document.body.style.overflow = 'hidden';
+          
+          // Store scroll position for restoration
+          document.body.dataset.scrollY = scrollY.toString();
+          document.body.dataset.scrollX = scrollX.toString();
+        } else {
+          // Restore scroll lock and position
+          const scrollY = parseInt(document.body.dataset.scrollY || '0', 10);
+          const scrollX = parseInt(document.body.dataset.scrollX || '0', 10);
+          
+          document.body.style.position = '';
+          document.body.style.top = '';
+          document.body.style.left = '';
+          document.body.style.width = '';
+          document.body.style.height = '';
+          document.body.style.overflow = '';
+          
+          // Restore scroll position
+          window.scrollTo(scrollX, scrollY);
+          
+          // Clean up
+          delete document.body.dataset.scrollY;
+          delete document.body.dataset.scrollX;
+        }
+        
+        return () => {
+          // Emergency cleanup on unmount
+          document.body.style.position = '';
+          document.body.style.top = '';
+          document.body.style.left = '';
+          document.body.style.width = '';
+          document.body.style.height = '';
+          document.body.style.overflow = '';
+          delete document.body.dataset.scrollY;
+          delete document.body.dataset.scrollX;
+        };
+      }, [selectedProduct, cartOpen]);
 
       // Merge base CATALOG with owner overrides/hides
       const allProducts = useMemo(() => {
