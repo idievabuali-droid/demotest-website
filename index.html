@@ -5,12 +5,17 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Odil Accessories</title>
   <meta name="description" content="Wholesale phone accessories catalogue with WhatsApp ordering" />
-  <!-- Tailwind Play CDN (generates utilities at runtime) -->
+  <!-- Tailwind (ok to keep CDN) -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  
+  <!-- React & ReactDOM MUST run before your inline script -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel Standalone for JSX transpilation -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- Supabase -->
+  
+  <!-- Supabase can also load here -->
   <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <style>
     :root {
@@ -32,7 +37,7 @@
 </head>
 <body class="bg-slate-50 text-slate-900">
   <div id="root"></div>
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react">
     const { useState, useEffect, useRef, useMemo } = React;
 
     // ---- Types (JSDoc for clarity) ----
@@ -108,30 +113,105 @@
     // CREATE POLICY "Enable all operations for products" ON products FOR ALL USING (true);
     // 
     // 4. Replace the placeholders below with your actual credentials
-    const SUPABASE_URL = 'https://bslehhvvtyxxpbgddcbt.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzbGVoaHZ2dHl4eHBiZ2RkY2J0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY1NjYxMjMsImV4cCI6MjA3MjE0MjEyM30.-b5qm72nssT5CVeb3BdLyP8k-7cE_ZyGq5MC3Ilirmk';
+    const SUPABASE_URL = 'https://vfilqtnmoswebeenuvyj.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZmaWxxdG5tb3N3ZWJlZW51dnlqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY2NDY2NDgsImV4cCI6MjA3MjIyMjY0OH0.h1ZlB7XxAP8EhbI_GSdyU7DRgucOO2BG3psFMbimW6Y';
     
     // Initialize Supabase client
     let supabase = null;
     try {
       if (window.supabase && SUPABASE_URL !== 'https://your-project-ref.supabase.co') {
         supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        console.log('✅ Supabase client initialized successfully');
+        console.log('📍 Supabase URL:', SUPABASE_URL);
+        
+        // Comprehensive connection test
+        const testConnection = async () => {
+          try {
+            console.log('🔄 Testing database connection...');
+            
+            // Test 1: Basic select
+            const { data: testData, error: testError } = await supabase
+              .from('products')
+              .select('count')
+              .limit(1);
+            
+            if (testError) {
+              console.error('❌ Database test failed:', testError);
+              if (testError.message.includes('permission denied')) {
+                console.error('🚫 RLS Policy Issue: Run the SQL script to fix permissions');
+              }
+              if (testError.message.includes('relation "products" does not exist')) {
+                console.error('🏗️ Table Missing: Run the SQL script to create the products table');
+              }
+            } else {
+              console.log('✅ Database connection successful');
+            }
+            
+            // Test 2: Check realtime capability
+            console.log('🔄 Testing realtime connection...');
+            const channel = supabase.channel('test-channel');
+            channel.subscribe((status) => {
+              if (status === 'SUBSCRIBED') {
+                console.log('✅ Realtime connection successful');
+                channel.unsubscribe();
+              } else if (status === 'CHANNEL_ERROR') {
+                console.error('❌ Realtime connection failed');
+              }
+            });
+            
+          } catch (error) {
+            console.error('❌ Connection test failed:', error);
+          }
+        };
+        
+        // Run test after a short delay
+        setTimeout(testConnection, 1000);
+        
+      } else {
+        console.warn('⚠️ Supabase not initialized - missing window.supabase or invalid URL');
       }
     } catch (error) {
-      console.warn('Supabase initialization failed:', error);
+      console.error('❌ Supabase initialization failed:', error);
     }
+
+    // Utility function for retrying failed operations
+    const retryOperation = async (operation, maxRetries = 3, delay = 1000) => {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          return await operation();
+        } catch (error) {
+          console.warn(`⚠️ Attempt ${attempt}/${maxRetries} failed:`, error.message);
+          if (attempt === maxRetries) throw error;
+          await new Promise(resolve => setTimeout(resolve, delay * attempt));
+        }
+      }
+    };
 
     // ---- Database Functions ----
     const loadProductsFromDatabase = async () => {
-      if (!supabase) return [];
+      if (!supabase) {
+        console.warn('⚠️ Cannot load products: Supabase not initialized');
+        return [];
+      }
       try {
+        console.log('🔄 Loading products from database...');
         const { data, error } = await supabase
           .from('products')
           .select('*')
           .order('created_at', { ascending: false });
-        
-        if (error) throw error;
-        return data || [];
+
+        if (error) {
+          console.error('❌ Database error:', error);
+          throw error;
+        }
+
+        console.log(`✅ Loaded ${data?.length || 0} products from database`);
+
+        // map DB -> app shape
+        return (data || []).map(r => ({
+          ...r,
+          sourceId: r.sourceid,   // <-- add this line
+        }));
       } catch (error) {
         console.error('Failed to load products:', error);
         return [];
@@ -139,31 +219,47 @@
     };
 
     const saveProductToDatabase = async (product) => {
-      if (!supabase) return null;
+      if (!supabase) {
+        console.warn('⚠️ Cannot save product: Supabase not initialized');
+        return null;
+      }
+      
       try {
-        const { data, error } = await supabase
-          .from('products')
-          .insert([{
-            id: product.id,
-            name: product.name,
-            sku: product.sku,
-            category: product.category,            // ← correct field name
-            price: product.price,
-            description: product.description,
-            images: product.images ?? (product.image ? [product.image] : null),
-            specs: product.specs ?? [],
-            variants: product.variants ?? null,
-            sourceId: product.sourceId ?? null,
-            hidden: product.hidden ?? false
-            // created_at is set by default in the DB
-          }])
-          .select()
-          .single();
+        return await retryOperation(async () => {
+          console.log('🔄 Saving product to database:', product.name);
+          const { data, error } = await supabase
+            .from('products')
+            .insert([(() => {
+              const row = {
+                id: product.id,
+                name: product.name,
+                sku: product.sku,
+                category: product.category,
+                price: product.price,
+                description: product.description ?? ''
+              };
+              // Only include optional fields when we actually have values.
+              const imgs = product.images ?? (product.image ? [product.image] : undefined);
+              if (imgs && imgs.length) row.images = imgs;
+              if (Array.isArray(product.specs) && product.specs.length) row.specs = product.specs;
+              if (product.variants && Object.keys(product.variants).length) row.variants = product.variants;
+              if (product.sourceId) row.sourceid = product.sourceId; // not sourceId
+              row.hidden = Boolean(product.hidden);
+              console.log('📤 Sending to database:', row);
+              return row;
+            })()])
+            .select()
+            .single();
 
-        if (error) throw error;
-        return data;
+          if (error) {
+            console.error('❌ Database save error:', error);
+            throw error;
+          }
+          console.log('✅ Product saved successfully:', data);
+          return data;
+        });
       } catch (error) {
-        console.error('Failed to save product:', error);
+        console.error('❌ Failed to save product after retries:', error);
         return null;
       }
     };
@@ -171,9 +267,27 @@
     const upsertProductToDatabase = async (product) => {
       if (!supabase) return null;
       try {
+        const clean = (() => {
+          const row = {
+            id: product.id,
+            name: product.name,
+            sku: product.sku,
+            category: product.category,
+            price: product.price,
+            description: product.description ?? ''
+          };
+          const imgs = product.images ?? (product.image ? [product.image] : undefined);
+          if (imgs && imgs.length) row.images = imgs;
+          if (Array.isArray(product.specs) && product.specs.length) row.specs = product.specs;
+          if (product.variants && Object.keys(product.variants).length) row.variants = product.variants;
+          if (product.sourceId) row.sourceid = product.sourceId; // not sourceId
+          row.hidden = Boolean(product.hidden);
+          return row;
+        })();
+
         const { data, error } = await supabase
           .from('products')
-          .upsert([product], { onConflict: 'id' })
+          .upsert([clean], { onConflict: 'id' })
           .select()
           .single();
         if (error) throw error;
@@ -489,15 +603,19 @@
     function useOwnerProducts(){
       const [ownerProducts, setOwnerProducts] = useState(/** @type Product[] */([]));
       const [loading, setLoading] = useState(true);
+      const [connectionStatus, setConnectionStatus] = useState('connecting');
 
       // Load products from database on mount
       useEffect(() => {
         const loadProducts = async () => {
           try {
+            setConnectionStatus('connecting');
             const products = await loadProductsFromDatabase();
             setOwnerProducts(products);
+            setConnectionStatus('connected');
           } catch (error) {
             console.error('Failed to load products from database:', error);
+            setConnectionStatus('error');
             // Fallback to localStorage
             try {
               const raw = localStorage.getItem(OWNER_STORAGE_KEY);
@@ -516,20 +634,68 @@
 
       // Subscribe to real-time changes
       useEffect(() => {
-        const subscription = subscribeToProductChanges((payload) => {
-          console.log('Real-time product change:', payload);
-          
-          if (payload.eventType === 'INSERT') {
-            setOwnerProducts(prev => [payload.new, ...prev]);
-          } else if (payload.eventType === 'DELETE') {
-            setOwnerProducts(prev => prev.filter(p => p.id !== payload.old.id));
-          } else if (payload.eventType === 'UPDATE') {
-            setOwnerProducts(prev => prev.map(p => p.id === payload.new.id ? payload.new : p));
-          }
-        });
+        if (!supabase) {
+          console.warn('⚠️ Cannot setup realtime: Supabase not initialized');
+          return;
+        }
+        
+        console.log('🔄 Setting up realtime subscription...');
+        
+        const channel = supabase
+          .channel('schema-db-changes')
+          .on('postgres_changes',
+            { event: '*', schema: 'public', table: 'products' },
+            (payload) => {
+              console.log('🔴 Realtime event received:', payload.eventType, payload);
+              setOwnerProducts(prev => {
+                if (payload.eventType === 'INSERT') {
+                  console.log('➕ Adding product via realtime:', payload.new.name);
+                  const incoming = { ...payload.new, sourceId: payload.new.sourceid };
+                  const i = prev.findIndex(p => p.id === incoming.id);
+                  if (i >= 0) { 
+                    console.log('🔄 Updating existing product instead of duplicating');
+                    const next = [...prev]; 
+                    next[i] = incoming; 
+                    return next; 
+                  }
+                  return [incoming, ...prev];
+                }
+                if (payload.eventType === 'UPDATE') {
+                  console.log('✏️ Updating product via realtime:', payload.new.name);
+                  return prev.map(p => p.id === payload.new.id ? { ...payload.new, sourceId: payload.new.sourceid } : p);
+                }
+                if (payload.eventType === 'DELETE') {
+                  console.log('🗑️ Deleting product via realtime:', payload.old.id);
+                  return prev.filter(p => p.id !== payload.old.id);
+                }
+                return prev;
+              });
+            }
+          )
+          .subscribe((status) => {
+            console.log('🔴 Realtime status:', status);
+            if (status === 'SUBSCRIBED') {
+              console.log('✅ Realtime subscription active!');
+              setConnectionStatus('connected');
+              // Catch up on any missed events by reloading data
+              loadProductsFromDatabase().then(products => {
+                console.log('🔄 Reloaded products after reconnection');
+                setOwnerProducts(products);
+              }).catch(error => {
+                console.error('❌ Failed to reload products after reconnection:', error);
+              });
+            } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+              console.error('❌ Realtime subscription failed!');
+              setConnectionStatus('error');
+            } else {
+              console.log('🔄 Realtime connecting...');
+              setConnectionStatus('connecting');
+            }
+          });
 
         return () => {
-          if (subscription) subscription.unsubscribe();
+          console.log('🔌 Cleaning up realtime subscription');
+          channel.unsubscribe();
         };
       }, []);
 
@@ -557,26 +723,20 @@
       const addProduct = async (product) => {
         const savedProduct = await saveProductToDatabase(product);
         if (savedProduct) {
-          // Real-time subscription will handle the state update
-          return savedProduct;
+          setOwnerProducts(prev => [savedProduct, ...prev]);  // <— add this line
         } else {
-          // Fallback to local state update
-          setOwnerProductsWithDB(prev => [product, ...prev]);
-          return product;
+          setOwnerProducts(prev => [product, ...prev]);       // fallback
         }
+        return savedProduct || product;
       };
 
       // Delete product function
       const deleteProduct = async (productId) => {
         const success = await deleteProductFromDatabase(productId);
         if (success) {
-          // Real-time subscription will handle the state update
-          return true;
-        } else {
-          // Fallback to local state update
-          setOwnerProductsWithDB(prev => prev.filter(p => p.id !== productId));
-          return false;
+          setOwnerProducts(prev => prev.filter(p => p.id !== productId)); // <— add this
         }
+        return success;
       };
 
       return { 
@@ -584,7 +744,8 @@
         setOwnerProducts: setOwnerProductsWithDB, 
         addProduct,
         deleteProduct,
-        loading 
+        loading,
+        connectionStatus
       };
     }
 
@@ -602,15 +763,46 @@
       return React.createElement('a', { href: '#main', className: 'sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 bg-white text-indigo-700 px-3 py-2 rounded-md shadow' }, 'Skip to content');
     }
 
-  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty }){
+  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus }){
       const [scrolled, setScrolled] = useState(false);
+      const hdrRef = useRef(null);
       useEffect(()=>{ const onScroll=()=> setScrolled(window.scrollY>4); onScroll(); window.addEventListener('scroll', onScroll, { passive:true }); return ()=> window.removeEventListener('scroll', onScroll); },[]);
-      return React.createElement('header', { className: cx("sticky top-0 z-40 w-full backdrop-blur supports-[backdrop-filter]:bg-white/60", scrolled?"shadow-sm":"") },
+      // measure header height (incl. mobile search row) -> CSS var --header-offset
+      useEffect(() => {
+        const setVar = () => {
+          const h = hdrRef.current?.offsetHeight || 64;
+          document.documentElement.style.setProperty('--header-offset', h + 'px');
+        };
+        setVar();
+        window.addEventListener('resize', setVar, { passive:true });
+        return () => window.removeEventListener('resize', setVar);
+      }, [ownerMode, search]);
+      return React.createElement('header', { ref: hdrRef, className: cx("sticky top-0 z-40 w-full backdrop-blur supports-[backdrop-filter]:bg-white/60", scrolled?"shadow-sm":"") },
         React.createElement('div', { className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8' },
           React.createElement('div', { className: 'flex h-16 items-center justify-between gap-2' },
             React.createElement('div', { className: 'flex items-center gap-2 min-w-0' },
               React.createElement(Logo, { className: 'h-6 w-6 text-indigo-600 flex-shrink-0' }),
-              React.createElement('span', { className: 'font-semibold text-gray-900 text-sm sm:text-base truncate' }, BRAND_NAME)
+              React.createElement('span', { className: 'font-semibold text-gray-900 text-sm sm:text-base truncate' }, BRAND_NAME),
+              React.createElement('div', { 
+                className: `flex items-center gap-1 text-xs px-2 py-1 rounded-full ${
+                  connectionStatus === 'connected' ? 'bg-green-100 text-green-700' :
+                  connectionStatus === 'error' ? 'bg-red-100 text-red-700' :
+                  'bg-yellow-100 text-yellow-700'
+                }`,
+                title: `Database ${connectionStatus}`
+              },
+                React.createElement('div', { 
+                  className: `w-2 h-2 rounded-full ${
+                    connectionStatus === 'connected' ? 'bg-green-500' :
+                    connectionStatus === 'error' ? 'bg-red-500' :
+                    'bg-yellow-500 animate-pulse'
+                  }`
+                }),
+                React.createElement('span', { className: 'hidden sm:inline' }, 
+                  connectionStatus === 'connected' ? 'Online' :
+                  connectionStatus === 'error' ? 'Offline' : 'Connecting'
+                )
+              )
             ),
             React.createElement('nav', { className: 'flex items-center gap-1 sm:gap-2' },
               !ownerMode && React.createElement('label', { className: 'relative hidden sm:block' },
@@ -633,7 +825,7 @@
             )
           ),
           // Mobile search bar below header on small screens
-          !ownerMode && React.createElement('div', { className: 'sm:hidden pb-2' },
+          !ownerMode && React.createElement('div', { className: 'sm:hidden pb-0' },
             React.createElement('label', { className: 'relative block' },
               React.createElement('span', { className: 'sr-only' }, 'Search'),
               React.createElement('input', {
@@ -670,7 +862,7 @@
 
     function CategoryChips({ active, setActive }){
       return React.createElement(React.Fragment, null,
-        React.createElement('div', { className: 'sticky top-16 z-30 bg-white/80 backdrop-blur border-b border-gray-200' },
+        React.createElement('div', { className: 'sticky top-[var(--header-offset,64px)] z-30 bg-white/80 backdrop-blur border-b border-gray-200' },
           React.createElement('div', { className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8', 'aria-label': 'Categories' },
             React.createElement('div', { className: '-mx-4 overflow-x-auto px-4' },
               React.createElement('div', { className: 'flex gap-2 py-2' },
@@ -694,7 +886,7 @@
       return React.createElement('section', { id: 'catalogue', 'aria-labelledby': 'catalogue-title', className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6' },
         React.createElement('h2', { id: 'catalogue-title', className: 'sr-only' }, 'Catalogue'),
         React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' },
-          products.map((p)=> React.createElement(ProductCard, { key: p.id, product: p, onOpen: ()=> onOpen(p) }))
+          products.map((p)=> React.createElement(ProductCard, { key: p.id, product: p, onOpen }))
         )
       );
     }
@@ -703,8 +895,8 @@
       const [src, setSrc] = useState(getPrimaryImage(product));
       useEffect(()=>{ setSrc(getPrimaryImage(product)); },[product.image, product.images, product.name]);
       return React.createElement('article', { className: 'group flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm' },
-        React.createElement('div', { className: 'aspect-[4/3] w-full bg-gray-100' },
-          React.createElement('img', { src: src, onError: ()=> setSrc(buildPlaceholderDataURI(product.name)), alt: product.name, className: 'h-full w-full object-cover' })
+        React.createElement('div', { className: 'aspect-square w-full bg-gray-100' },
+          React.createElement('img', { src: src, onError: ()=> setSrc(buildPlaceholderDataURI(product.name)), alt: product.name, className: 'h-full w-full object-cover', loading: 'lazy' })
         ),
         React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' },
           React.createElement('header', null,
@@ -718,19 +910,30 @@
             React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(product.price))
           ),
           React.createElement('div', null,
-            React.createElement('button', { onClick: onOpen, className: 'w-full rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'View details')
+            React.createElement('button', { type: 'button', onClick: () => { console.log('🔍 ProductCard clicked, product:', product); onOpen(product); }, className: 'w-full rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'View details')
           )
         )
       );
     }
 
-    function ProductModal({ product, onClose, onAdd }){
+    function ProductModal({ product: rawProduct, onClose, onAdd }){
+      // Accept either a real product or a wrapper like { __edit: true, product: {...} }
+      // IMPORTANT: Do this BEFORE any hooks!
+      const product = (rawProduct && rawProduct.__edit && rawProduct.product)
+        ? rawProduct.product
+        : rawProduct;
+      
+      console.log('🔍 ProductModal received rawProduct:', rawProduct);
+      console.log('🔍 ProductModal unwrapped product:', product);
+      
+      // Early return BEFORE hooks to avoid React error #310
+      if (!product) return null;
+      
       const ref = useRef(null);
       useFocusTrap(!!product, ref, onClose);
 
-      // lock background scroll when modal is open
+      // lock background scroll when open
       useEffect(() => {
-        if (!product) return;
         const prevHtml = document.documentElement.style.overflow;
         const prevBody = document.body.style.overflow;
         document.documentElement.style.overflow = 'hidden';
@@ -741,209 +944,172 @@
         };
       }, [product]);
 
-      // base variant selections (for everything except Model/Color)
-      const [baseSelections, setBaseSelections] = useState({});
-      // filters (which models/colors are active)
-      const [activeModels, setActiveModels] = useState([]);
-      const [activeColors, setActiveColors] = useState([]);
-      // quantity per combination (keys like "Model|Color", "Model|", "|Color")
-      const [qtyMap, setQtyMap] = useState({}); // { "iPhone 12|Red": 0, ... }
-
-      useEffect(()=>{
-        if (!product) return;
-        // init base selections from other variant dimensions
-        const initBase = {};
-        const v = product.variants || {};
-        Object.entries(v).forEach(([k, arr])=>{
-          if (k !== 'Model' && k !== 'Color' && Array.isArray(arr) && arr.length) {
-            initBase[k] = arr[0];
-          }
-        });
-        setBaseSelections(initBase);
-
-        // default all models/colors to selectable, quantities to 0
-        const models = Array.isArray(v.Model) ? v.Model : null;
-        const colors = Array.isArray(v.Color) ? v.Color : null;
-        setActiveModels(models || []);
-        setActiveColors(colors || []);
-        const next = {};
-        if (models && colors) {
-          models.forEach(m => colors.forEach(c => { next[`${m}|${c}`] = 0; }));
-        } else if (models) {
-          models.forEach(m => { next[`${m}|`] = 0; });
-        } else if (colors) {
-          colors.forEach(c => { next[`|${c}`] = 0; });
-        } else {
-          // no model/color → single quantity
-          next["|"] = 0;
-        }
-        setQtyMap(next);
-      }, [product]);
-
-      if(!product) return null;
-
-      const v = product.variants || {};
-      const models = Array.isArray(v.Model) ? v.Model : null;
-      const colors = Array.isArray(v.Color) ? v.Color : null;
-
-      // helpers
-      const setAllModels = () => setActiveModels(models || []);
-      const clearModels  = () => setActiveModels([]);
-      const toggleModel  = (m) => setActiveModels(prev => prev.includes(m) ? prev.filter(x=>x!==m) : [...prev, m]);
-
-      const setAllColors = () => setActiveColors(colors || []);
-      const clearColors  = () => setActiveColors([]);
-      const toggleColor  = (c) => setActiveColors(prev => prev.includes(c) ? prev.filter(x=>x!==c) : [...prev, c]);
-
-      const setQty = (key, value) => setQtyMap(prev => ({ ...prev, [key]: Math.max(0, Number(value)||0) }));
-
-      // compute gallery images
+      // resolve images
       const images = (() => {
         const list = Array.isArray(product.images) && product.images.length ? product.images
-          : (product.image ? [product.image] : []);
-        return list.length ? list : [buildPlaceholderDataURI(product.name)];
-      })().map(src => resolveImageSrc(src, product.name));
-
-      const minOrder = 0;
-
-      // Build combinations visible right now
-      const combos = (() => {
-        if (models && colors) {
-          return activeModels.flatMap(m => activeColors.map(c => ({ key: `${m}|${c}`, m, c })));
-        } else if (models) {
-          return activeModels.map(m => ({ key: `${m}|`, m, c: null }));
-        } else if (colors) {
-          return activeColors.map(c => ({ key: `|${c}`, m: null, c }));
-        }
-        return [{ key: '|', m: null, c: null }];
+                  : (product.image ? [product.image] : []);
+        return (list.length ? list : [buildPlaceholderDataURI(product.name)])
+          .map(src => resolveImageSrc(src, product.name));
       })();
 
-      // Add to cart
+      // ---- Variants: treat EVERY array-like dimension as multi-select
+      const v = product.variants || {};
+      const dims = Object.entries(v)
+        .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
+        .map(([label]) => label);
+
+      // selected options per dimension (default = all)
+      const [active, setActive] = useState({});
+      // per-combination quantities
+      const [qtyMap, setQtyMap] = useState({});
+
+      useEffect(() => {
+        if (!product) return;
+        const initActive = {};
+        dims.forEach(d => { initActive[d] = [...(v[d] || [])]; }); // select all by default
+        setActive(initActive);
+
+        // initialize quantity map for all current combinations
+        const keys = (() => {
+          if (dims.length === 0) return ['|'];
+          // cartesian product of selected options
+          const out = [];
+          const rec = (i, parts) => {
+            if (i === dims.length) { out.push(parts.join('|')); return; }
+            (initActive[dims[i]] || []).forEach(opt => rec(i + 1, [...parts, opt]));
+          };
+          rec(0, []);
+          return out;
+        })();
+        const next = {};
+        keys.forEach(k => { next[k] = 0; });
+        setQtyMap(next);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [product]);
+
+      const toggle = (dim, opt) => setActive(prev => {
+        const arr = prev[dim] || [];
+        const next = arr.includes(opt) ? arr.filter(x => x !== opt) : [...arr, opt];
+        return { ...prev, [dim]: next };
+      });
+      const selectAll = (dim) => setActive(prev => ({ ...prev, [dim]: [...(v[dim] || [])] }));
+      const clearDim  = (dim) => setActive(prev => ({ ...prev, [dim]: [] }));
+      const setQty    = (key, value) => setQtyMap(prev => ({ ...prev, [key]: Math.max(0, Number(value)||0) }));
+
+      // recompute current combinations whenever selections change
+      const combos = useMemo(() => {
+        if (dims.length === 0) return [{ key: '|', sel: {} }];
+        if (dims.some(d => (active[d] || []).length === 0)) return [];
+        const out = [];
+        const rec = (i, sel, parts) => {
+          if (i === dims.length) {
+            out.push({ key: parts.join('|'), sel });
+            return;
+          }
+          const d = dims[i];
+          (active[d] || []).forEach(opt => rec(i + 1, { ...sel, [d]: opt }, [...parts, opt]));
+        };
+        rec(0, {}, []);
+        return out;
+      }, [dims, active]);
+
       const onAddAll = () => {
         let any = false;
-        combos.forEach(({ key, m, c }) => {
+        combos.forEach(({ key, sel }) => {
           const q = Number(qtyMap[key] || 0);
           if (q > 0) {
-            const variants = { ...baseSelections };
-            if (m) variants.Model = m;
-            if (c) variants.Color = c;
-            onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: q, variants });
+            onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: q, variants: sel });
             any = true;
           }
         });
         if (any) onClose();
       };
 
-      // Disabled if nothing selected with qty > 0
-      const disabled = combos.every(({ key }) => Number(qtyMap[key]||0) <= 0);
+      const disabled = combos.every(({ key }) => Number(qtyMap[key] || 0) <= 0);
 
-      // UI
       return (
         React.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': `product-title-${product.id}`, className: 'fixed inset-0 z-50 flex items-stretch sm:items-center justify-center bg-black/40 p-0 sm:p-6' },
           React.createElement('div', { ref: ref, className: 'w-full h-full sm:h-auto sm:max-w-2xl rounded-none sm:rounded-2xl bg-white shadow-lg outline-none overscroll-contain overflow-y-auto max-h-none sm:max-h-[90vh]' },
             /* header */
             React.createElement('div', { className: 'p-4 border-b border-gray-200 flex items-center justify-between' },
               React.createElement('h3', { id: `product-title-${product.id}`, className: 'text-lg font-semibold text-gray-900' }, product.name),
-              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' }, React.createElement(XIcon, { className: 'h-5 w-5' }))
+              React.createElement('button', { onClick: onClose, className: 'rounded-full p-2 hover:bg-gray-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600', 'aria-label': 'Close' },
+                React.createElement(XIcon, { className: 'h-5 w-5' })
+              )
             ),
 
             React.createElement('div', { className: 'grid gap-4 p-4 sm:grid-cols-2' },
-              /* left: image (simple) */
+              /* left: image (square now) */
               React.createElement('div', { className: 'flex flex-col gap-2' },
-                React.createElement('div', { className: 'relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-gray-100' },
+                React.createElement('div', { className: 'relative aspect-square w-full overflow-hidden rounded-xl bg-gray-100' },
                   React.createElement('img', { src: images[0], onError: (e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }, alt: `${product.name} – photo`, className: 'h-full w-full object-cover' })
                 )
               ),
 
-              /* right: details */
+              /* right: variants + quantities */
               React.createElement('div', { className: 'flex min-w-0 flex-col gap-3' },
-                React.createElement('p', { className: 'text-sm text-gray-600' }, product.description),
+                product.description && React.createElement('p', { className: 'text-sm text-gray-600' }, product.description),
 
-                /* base (non model/color) variants */
-                !!v && (
-                  React.createElement('div', { className: 'space-y-2', 'aria-label': 'Variants' },
-                    Object.entries(v).filter(([label]) => label!=='Model' && label!=='Color').map(([label, options])=> (
-                      React.createElement('label', { key: label, className: 'block text-sm' },
-                        React.createElement('span', { className: 'mb-1 block text-gray-700' }, label),
-                        React.createElement('select', {
-                          value: baseSelections[label] || options[0],
-                          onChange: (e)=> setBaseSelections(s => ({ ...s, [label]: e.target.value })),
-                          className: 'w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600'
-                        }, options.map(opt => React.createElement('option', { key: opt, value: opt }, opt)))
-                      )
-                    ))
-                  )
-                ),
-
-                /* model filter */
-                models && (
-                  React.createElement('div', { className: 'text-sm' },
-                    React.createElement('div', { className: 'mb-1 flex items-center justify-between' },
-                      React.createElement('span', { className: 'text-gray-700' }, 'Models'),
-                      React.createElement('div', { className: 'flex items-center gap-2' },
-                        React.createElement('button', { type: 'button', onClick: setAllModels, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Select all'),
-                        React.createElement('button', { type: 'button', onClick: clearModels, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Clear')
-                      )
-                    ),
-                    React.createElement('div', { className: 'max-h-32 overflow-auto rounded-md border p-2' },
-                      React.createElement('div', { className: 'flex flex-wrap gap-1.5' },
-                        models.map(m => {
-                          const on = activeModels.includes(m);
-                          return (
-                            React.createElement('button', { type: 'button', key: m, onClick: ()=> toggleModel(m),
-                              className: cx('rounded-full border px-2 py-1', on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') }, m)
-                          );
-                        })
+                /* One collapsible section per variant dimension */
+                dims.map(dim => {
+                  const opts = v[dim] || [];
+                  const current = active[dim] || [];
+                  const isColor = dim.toLowerCase().includes('color') || dim === 'Color';
+                  return (
+                    React.createElement('div', { key: dim, className: 'text-sm' },
+                      React.createElement('div', { className: 'mb-1 flex items-center justify-between' },
+                        React.createElement('span', { className: 'text-gray-700' }, dim),
+                        React.createElement('div', { className: 'flex items-center gap-2' },
+                          React.createElement('button', { type: 'button', onClick: ()=> selectAll(dim), className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Select all'),
+                          React.createElement('button', { type: 'button', onClick: ()=> clearDim(dim), className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Clear')
+                        )
+                      ),
+                      React.createElement('div', { className: 'max-h-32 overflow-auto rounded-md border p-2' },
+                        React.createElement('div', { className: 'flex flex-wrap gap-1.5' },
+                          opts.map(opt => {
+                            const on = current.includes(opt);
+                            return (
+                              React.createElement('button', { type: 'button', key: opt, onClick: ()=> toggle(dim, opt),
+                                className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-1',
+                                  on ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-gray-300 bg-white text-gray-700') },
+                                isColor ? React.createElement(ColorDot, { name: opt }) : null,
+                                opt
+                              )
+                            );
+                          })
+                        )
                       )
                     )
-                  )
-                ),
+                  );
+                }),
 
-                /* color filter */
-                colors && (
-                  React.createElement('div', { className: 'text-sm' },
-                    React.createElement('div', { className: 'mb-1 flex items-center justify-between' },
-                      React.createElement('span', { className: 'text-gray-700' }, 'Colors'),
-                      React.createElement('div', { className: 'flex items-center gap-2' },
-                        React.createElement('button', { type: 'button', onClick: setAllColors, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Select all'),
-                        React.createElement('button', { type: 'button', onClick: clearColors, className: 'rounded-full border px-2 py-0.5 text-xs border-gray-300 text-gray-700 hover:bg-gray-50' }, 'Clear')
-                      )
-                    ),
-                    React.createElement('div', { className: 'flex flex-wrap gap-1.5' },
-                      colors.map(c => {
-                        const on = activeColors.includes(c);
-                        return (
-                          React.createElement('button', { type: 'button', key: c, onClick: ()=> toggleColor(c),
-                            className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-1',
-                              on?'border-indigo-600 bg-indigo-50 text-indigo-700':'border-gray-300 bg-white text-gray-700') },
-                            React.createElement(ColorDot, { name: c}), ' ', c
-                          )
-                        );
-                      })
-                    )
-                  )
-                ),
-
-                /* quantities by combination (mobile-friendly list) */
+                /* quantities by combination */
                 React.createElement('div', { className: 'mt-1 space-y-2', 'aria-label': 'Quantities' },
                   combos.length === 0 ? (
-                    React.createElement('p', { className: 'text-xs text-gray-600' }, 'Select at least one model/color.')
+                    React.createElement('p', { className: 'text-xs text-gray-600' }, 'Select at least one option.')
                   ) : (
-                    combos.map(({ key, m, c }) => (
+                    combos.map(({ key, sel }) => (
                       React.createElement('div', { key: key, className: 'flex items-center justify-between rounded-lg border p-2' },
                         React.createElement('div', { className: 'text-sm text-gray-800' },
-                          m && React.createElement('span', { className: 'font-medium' }, m),
-                          m && c ? ' — ' : '',
-                          c && React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: c}), c),
-                          !m && !c && React.createElement('span', { className: 'font-medium' }, 'Quantity')
+                          Object.entries(sel).map(([k, val], i) => (
+                            React.createElement('span', { key: k },
+                              i>0 ? ' — ' : '',
+                              k === 'Color' ? (
+                                React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: val}), ' ', val)
+                              ) : (
+                                React.createElement('span', { className: 'font-medium' }, val)
+                              )
+                            )
+                          )),
+                          Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium' }, 'Quantity')
                         ),
-                        React.createElement(NumberStepper, { value: Number(qtyMap[key]||0), onChange: (v)=> setQty(key, Math.max(0, v)), min: 0 })
+                        React.createElement(NumberStepper, { value: Number(qtyMap[key]||0), onChange: (v)=> setQty(key, v), min: 0})
                       )
                     ))
                   )
                 ),
 
-                /* price/min order summary */
+                /* price */
                 React.createElement('dl', { className: 'mt-1 grid grid-cols-1 gap-2 text-sm' },
                   React.createElement('div', { className: 'rounded-lg bg-gray-50 p-2' },
                     React.createElement('dt', { className: 'text-gray-500' }, 'Unit price'),
@@ -1339,13 +1505,45 @@
   // All fields are optional now; do not validate required fields.
         const autoName = (cfg.name && cfg.name(form)) || `${category} item`;
         const finalName = name.trim() || autoName;
-        const variants = {};
-        const push = (label, val) => { if(val == null || val === '' || (Array.isArray(val) && val.length === 0)) return; variants[label] = Array.isArray(val) ? val : [String(val)]; };
-  [...(cfg.must||[]), ...(cfg.also||[]), ...(cfg.optional||[])].forEach(f=>{ const val = form[f.key]; if(f.type === 'checkbox'){ if(val) push(f.label, 'Yes'); } else push(f.label, val); });
-  // If the phoneModels field set a brand (e.g. form['modelsBrand']), surface it as a Phone variant
-  if(form['modelsBrand']) push('Phone', form['modelsBrand']);
+        const variantsObj = {};
+        const normalizeLabel = (label, key) => {
+          // standardize keys so ProductModal recognizes them
+          if (key === 'models') return 'Model';
+          const lower = String(label).toLowerCase().trim();
+          if (lower === 'color' || lower === 'colors' || lower === 'colour') return 'Color';
+          return label.trim();
+        };
+        const push = (label, key, val) => {
+          if (val == null || val === '' || (Array.isArray(val) && val.length === 0)) return;
+          const lbl = normalizeLabel(label, key);
+          variantsObj[lbl] = Array.isArray(val) ? val : [String(val)];
+        };
+        // gather all variant dimensions (must/also/optional)
+        [...(cfg.must||[]), ...(cfg.also||[]), ...(cfg.optional||[])]
+          .forEach(f => {
+            const val = form[f.key];
+            if (f.type === 'checkbox') {
+              if (val) push(f.label, f.key, 'Yes');
+            } else {
+              push(f.label, f.key, val);
+            }
+          });
+        // optional: surface chosen brand for phoneModels
+        if (form['modelsBrand']) push('Phone', 'modelsBrand', form['modelsBrand']);
   const specs = ((cfg.specs && cfg.specs(form)) || []).filter(Boolean).slice(0,6);
-        return { id: `owner-${Date.now()}`, name: finalName, sku: sku || `SKU-${(Math.random()*1e6|0).toString(36)}`, category, price: Number(price) || 0, description, image: imagesData[0] || undefined, images: imagesData.length ? imagesData : undefined, specs, variants: Object.keys(variants).length ? variants : undefined };
+
+        return {
+          id: `owner-${Date.now()}`,
+          name: finalName,
+          sku: sku || `SKU-${(Math.random()*1e6|0).toString(36)}`,
+          category,
+          price: Number(price) || 0,
+          description,
+          image: imagesData[0] || undefined,
+          images: imagesData.length ? imagesData : undefined,
+          specs,
+          variants: variantsObj // <-- was conditionally undefined; keep as empty object if nothing
+        };
       };
 
       const submit = () => { const p = buildProduct(); if(!p) return; addProduct(p); setName(''); setSku(''); setPrice(''); setDescription(''); setImagesData([]); setForm({}); };
@@ -1535,7 +1733,7 @@
             <div className="grid gap-4 p-4 sm:grid-cols-2">
               {/* Left: big image + arrows + thumbnails + add/remove */}
               <div className="flex flex-col gap-2">
-                <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-gray-100">
+                <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-gray-100">
                   <img
                     src={resolveImageSrc(images[galleryIndex] || '', product.name)}
                     onError={(e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }}
@@ -1684,7 +1882,7 @@
 
       return (
         React.createElement('section', { 'aria-labelledby': 'mgr-title', className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6' },
-          React.createElement('div', { className: 'sticky top-16 z-30 bg-white/80 backdrop-blur border-b border-gray-200' },
+          React.createElement('div', { className: 'sticky top-[var(--header-offset,64px)] z-30 bg-white/80 backdrop-blur border-b border-gray-200' },
             React.createElement('div', { className: 'flex items-center justify-between gap-3 py-2' },
               React.createElement('h2', { id: 'mgr-title', className: 'text-base sm:text-lg font-semibold text-gray-900' }, 'Owner — Manage catalogue'),
               React.createElement('div', { className: 'flex items-center gap-2' },
@@ -1703,7 +1901,7 @@
               )
             )
           ),
-          React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm' }, React.createElement('div', { className: 'aspect-[4/3] w-full bg-gray-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-gray-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-gray-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'rounded-full border border-gray-300 bg-gray-50 px-2 py-0.5 text-xs text-gray-700' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-gray-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50' }, 'Hide')))))) ,
+          React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm' }, React.createElement('div', { className: 'aspect-square w-full bg-gray-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-gray-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-gray-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'rounded-full border border-gray-300 bg-gray-50 px-2 py-0.5 text-xs text-gray-700' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-gray-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-gray-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 hover:bg-gray-50' }, 'Hide')))))) ,
           React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, onSave: onSave, onHide: onHide, onDelete: onDelete })
         )
       );
@@ -1719,7 +1917,7 @@
       const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
       const [ownerMode, setOwnerMode] = useState(false);
       const cart = useCart();
-      const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading } = useOwnerProducts();
+      const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
 
       // Merge base CATALOG with owner overrides/hides
       const allProducts = useMemo(() => {
@@ -1751,7 +1949,7 @@
       const filteredProducts = useMemo(() => {
         let filtered = allProducts;
         if (category !== "All") filtered = filtered.filter(p => p.category === category);
-        if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()) || p.description.toLowerCase().includes(search.toLowerCase()));
+        if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()) || (p.description || '').toLowerCase().includes(search.toLowerCase()));
         return filtered;
       }, [allProducts, category, search]);
 
@@ -1768,21 +1966,39 @@
       });
 
       const saveEdit = async (edited, baseId) => {
-        // Ensure an id for new overrides
-        const withId = edited.id
+        const isOwner = edited.id?.startsWith?.('owner-');
+
+        // Always create an override when editing a seed/base product
+        const payload = isOwner
           ? edited
-          : { ...edited, id: `owner-${Date.now()}`, sourceId: baseId || edited.id };
-        // Persist to DB; realtime subscription will update state everywhere
-        const saved = await upsertProductToDatabase(withId);
+          : {
+              ...edited,
+              id: `owner-${Date.now()}`,
+              sourceId: baseId,       // app-side field
+            };
+
+        const saved = await upsertProductToDatabase(payload); // will write 'sourceid'
         if (!saved) {
-          // Fallback to local UI if DB fails (won't sync across devices)
-          upsertOwner(withId);
+          // local fallback so the UI still updates if network fails
+          upsertOwner(payload);
         }
       };
 
-      const hideBase = (baseId) => {
-        const newId = `owner-hide-${Date.now()}`;
-        upsertOwner({ id: newId, sourceId: baseId, hidden: true, name: "", sku: "", category: "All", price: 0, description: "", specs: [] });
+      const hideBase = async (baseId) => {
+        const record = {
+          id: `owner-hide-${Date.now()}`,
+          sourceId: baseId,             // app-side field
+          hidden: true,
+          name: '',
+          sku: '',
+          category: 'All',
+          price: 0,
+          description: '',
+          specs: [],
+        };
+
+        const saved = await upsertProductToDatabase(record); // will write 'sourceid'
+        upsertOwner(saved || record); // keep UI in sync either way
       };
 
       const deleteOwnerProduct = deleteProduct;
@@ -1801,7 +2017,7 @@
 
       return React.createElement('div', { className: 'min-h-screen bg-slate-50' },
         React.createElement(SkipLink),
-  React.createElement(Header, { onOpenCart: ()=> setCartOpen(true), search, setSearch, ownerMode, setOwnerMode, cartQty }),
+  React.createElement(Header, { onOpenCart: ()=> setCartOpen(true), search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus }),
         ownerMode ? (
           ownerManage ? (
             React.createElement(OwnerManager, { products: allProducts, onClose: ()=> setOwnerManage(false), onEdit: (p)=> setSelectedProduct({ __edit: true, product: p }), onHide: (baseId)=> hideBase(baseId), onDelete: (id)=> deleteOwnerProduct(id), onSave: saveEdit })
@@ -1809,7 +2025,7 @@
             React.createElement(OwnerPage, { addProduct: addProduct, products: ownerProducts, removeProduct: (id)=> deleteOwnerProduct(id) })
           )
         ) : (
-          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { products: filteredProducts, onOpen: setSelectedProduct }))
+          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { products: filteredProducts, onOpen: (p) => setSelectedProduct(p && p.__edit && p.product ? p.product : p) }))
         ),
         React.createElement(ProductModal, { product: selectedProduct, onClose: ()=> setSelectedProduct(null), onAdd: cart.add }),
         React.createElement(CartDrawer, { open: cartOpen, onClose: ()=> setCartOpen(false), cart })
