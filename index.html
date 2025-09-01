@@ -1275,7 +1275,14 @@
                     if (!hasQty) return;
 
                     // 1) Copy message (best effort; still proceed if copy fails)
-                    try { await copyToClipboardSafe(message); } catch {}
+                    try { 
+                      await copyToClipboardSafe(message); 
+                      // Show clear notification that the list is copied
+                      alert('✅ Your list is copied! If WhatsApp doesn\'t open, you can paste it manually.');
+                    } catch {
+                      // Even if copy fails, let user know they can try manually
+                      alert('📋 Please copy your order manually if WhatsApp doesn\'t open automatically.');
+                    }
 
                     // 2) Arrange auto-clear even if the page gets backgrounded (mobile deep link)
                     let cleared = false;
