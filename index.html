@@ -1167,6 +1167,30 @@
       );
     }
 
+    async function copyToClipboardSafe(text){
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch {}
+      // Fallback for older browsers / denied permissions
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     function CartDrawer({ open, onClose, cart }){
       const ref = useRef(null);
       useFocusTrap(open, ref, onClose);
@@ -1247,16 +1271,37 @@
                 React.createElement('button', { onClick: cart.clear, className: 'flex-1 rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-indigo-600' }, 'Clear cart'),
                 React.createElement('button', {
                   type: 'button',
-                  onClick: ()=>{
+                  onClick: async ()=>{
                     if (!hasQty) return;
+
+                    // 1) Copy message (best effort; still proceed if copy fails)
+                    try { await copyToClipboardSafe(message); } catch {}
+
+                    // 2) Arrange auto-clear even if the page gets backgrounded (mobile deep link)
+                    let cleared = false;
+                    const clearAll = () => {
+                      if (cleared) return;
+                      cleared = true;
+                      cart.clear();
+                      cart.setNotes('');
+                    };
+                    const onHideOnce = () => clearAll();
+                    window.addEventListener('pagehide', onHideOnce, { once: true });
+                    document.addEventListener('visibilitychange', function handler(){
+                      if (document.hidden) { clearAll(); document.removeEventListener('visibilitychange', handler); }
+                    }, { once: true });
+
+                    // 3) Open WhatsApp (mobile deep-link + fallback, or desktop web)
                     if (isMobile) {
-                      // Try to open the native app
+                      // Clear BEFORE navigation so it still happens on iOS which may unload JS immediately
+                      clearAll();
                       window.location.href = waDeep;
                       // Fallback to web if app didn’t catch it
-                      setTimeout(()=>{ window.open(waWeb, "_blank", "noopener,noreferrer"); }, 700);
+                      setTimeout(()=>{ try{ window.open(waWeb, "_blank", "noopener,noreferrer"); }catch{} }, 800);
                     } else {
-                      // Desktop → WhatsApp Web
-                      window.open(waWeb, "_blank", "noopener,noreferrer");
+                      const win = window.open(waWeb, "_blank", "noopener,noreferrer");
+                      // If we stayed on the page (desktop), clear shortly after launching
+                      setTimeout(clearAll, 500);
                     }
                   },
                   className: cx(
@@ -1946,6 +1991,7 @@
     // ---- Main App ----
     function App(){
       const [products, setProducts] = useState(CATALOG);
+      const lastCatalogScrollRef = React.useRef(0);
       const [search, setSearch] = useState("");
       const [category, setCategory] = useState("All");
       const [selectedProduct, setSelectedProduct] = useState(null);
@@ -2095,9 +2141,27 @@
             React.createElement(OwnerPage, { addProduct: addProduct, products: ownerProducts, removeProduct: (id)=> deleteOwnerProduct(id) })
           )
         ) : (
-          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { products: filteredProducts, onOpen: (p) => setSelectedProduct(p && p.__edit && p.product ? p.product : p) }))
+          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
+            products: filteredProducts, 
+            onOpen: (p) => {
+              lastCatalogScrollRef.current = window.scrollY || 0;
+              setSelectedProduct(p && p.__edit && p.product ? p.product : p);
+            } 
+          }))
         ),
-        React.createElement(ProductModal, { product: selectedProduct, onClose: ()=> setSelectedProduct(null), onAdd: cart.add }),
+        React.createElement(ProductModal, { 
+          product: selectedProduct, 
+          onClose: ()=> {
+            setSelectedProduct(null);
+            // double-rAF to run after the lock effect unlocks the page
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                window.scrollTo(0, lastCatalogScrollRef.current || 0);
+              });
+            });
+          }, 
+          onAdd: cart.add 
+        }),
         React.createElement(CartDrawer, { open: cartOpen, onClose: ()=> setCartOpen(false), cart })
       );
     }
