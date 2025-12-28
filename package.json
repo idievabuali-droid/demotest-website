@@ -4,7 +4,9 @@
   "private": true,
   "description": "Minimal starter scaffold created by GitHub Copilot",
   "scripts": {
-    "start": "python -m http.server 5173"
+    "start": "python -m http.server 5173",
+    "extract": "node tools/extract-inline-babel.mjs",
+    "build": "node tools/build.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.2"
