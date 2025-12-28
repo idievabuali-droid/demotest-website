@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Odil Accessories</title>
-  <meta name="description" content="Wholesale phone accessories catalogue with WhatsApp ordering" />
+  <title>Odil Accessories · Owner Console</title>
+  <meta name="description" content="Internal console for managing the Odil Accessories wholesale catalogue" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -96,11 +96,8 @@
       box-shadow: var(--ring);
     }
 
-    .chip-scroll {
-      position: relative;
-    }
-    .chip-scroll::after,
-    .chip-scroll::before {
+    .chip-scroll-fade::after,
+    .chip-scroll-fade::before {
       pointer-events: none;
       content: "";
       position: absolute;
@@ -109,20 +106,17 @@
       bottom: 0;
       opacity: 0;
       transition: opacity 0.2s ease;
-      z-index: 2;
+      z-index: 1;
     }
-    .chip-scroll.show-right::after {
+    .chip-scroll-fade.show-right::after {
       opacity: 1;
       right: 0;
       background: linear-gradient(90deg, rgba(246,247,251,0) 0%, rgba(246,247,251,0.92) 100%);
     }
-    .chip-scroll.show-left::before {
+    .chip-scroll-fade.show-left::before {
       opacity: 1;
       left: 0;
       background: linear-gradient(270deg, rgba(246,247,251,0) 0%, rgba(246,247,251,0.92) 100%);
-    }
-    .chip-scroll-inner {
-      overflow-x: auto;
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -145,10 +139,19 @@
     html.is-locked { overscroll-behavior: none; }
   </style>
 </head>
-<body class="bg-[var(--surface-1)] text-slate-900 antialiased" data-owner-mode="disabled" data-default-owner="false" data-layout="customer">
+<body class="bg-[var(--surface-1)] text-slate-900 antialiased" data-owner-mode="enabled" data-default-owner="true" data-layout="owner">
   <div id="root"></div>
   <script type="text/babel" data-presets="react">
-    const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
+    (() => {
+      const OWNER_PASSWORD = 'bilol';
+      const OWNER_AUTH_KEY = 'owner_console_auth_v1';
+      let appMounted = false;
+
+      const mountApp = () => {
+        if (appMounted) return;
+        appMounted = true;
+
+        const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
 
     // ---- Types (JSDoc for clarity) ----
     /** @typedef {
@@ -177,12 +180,12 @@
    *  minOrder?: number,
    *  image?: string,
    *  images?: string[],   //  support multiple images
-   *  specs: string[],
-   *  description: string,
+  *  specs: string[],
+  *  description: string,
   *  variants?: Record<string, string[]>,
   *  // Add these to support owner overrides/hiding
   *  sourceId?: string,     // if this is an owner override of a base product
-  *  hidden?: boolean,      // if true (and sourceId is set), hide base product
+   *  hidden?: boolean,      // if true (and sourceId is set), hide base product
    *  inventory?: Record<string, number>,
    * }} Product
    */
@@ -200,14 +203,24 @@
     const OWNER_TOGGLE_ENABLED = OWNER_ACCESS_ENABLED && !OWNER_PORTAL_ONLY;
     const DEFAULT_OWNER_MODE = OWNER_PORTAL_ONLY || document.body.dataset.defaultOwner === 'true';
     const OWNER_API_ENDPOINT = '/.netlify/functions/catalogue';
+    const OWNER_DEFAULT_CURRENCY = CURRENCY;
     const INVENTORY_BASE_KEY = '__base__';
+
+    const normalizeVariantLabel = (label, key) => {
+      const fallback = (label || key || '').trim();
+      if (!fallback) return key || '';
+      const lower = fallback.toLowerCase();
+      if (lower.includes('color') || lower.includes('colour')) return 'Color';
+      if (key === 'models' || lower.includes('model')) return 'Model';
+      return fallback.replace(/\s+/g, ' ').trim();
+    };
 
     const buildVariantKey = (selection = {}) => {
       const entries = Object.entries(selection || {}).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '');
       if (!entries.length) return INVENTORY_BASE_KEY;
       return entries
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([dimension, value]) => `${dimension}:${value}`)
+        .map(([k, v]) => `${k}:${v}`)
         .join('|');
     };
 
@@ -221,6 +234,47 @@
         }
       });
       return result;
+    };
+
+    const computeVariantCombos = (optionsMap) => {
+      const entries = Object.entries(optionsMap || {}).filter(([_, arr]) => Array.isArray(arr) && arr.length);
+      if (!entries.length) {
+        return [{ key: INVENTORY_BASE_KEY, selection: {} }];
+      }
+      const combos = [];
+      const traverse = (index, acc) => {
+        if (index >= entries.length) {
+          const key = buildVariantKey(acc);
+          combos.push({ key, selection: { ...acc } });
+          return;
+        }
+        const [dimension, values] = entries[index];
+        values.forEach((val) => traverse(index + 1, { ...acc, [dimension]: val }));
+      };
+      traverse(0, {});
+      return combos;
+    };
+
+    const buildVariantOptionsFromForm = (form, cfg) => {
+      const fields = [...(cfg.must || []), ...(cfg.also || []), ...(cfg.optional || [])];
+      const variants = {};
+      fields.forEach((field) => {
+        const value = form[field.key];
+        const label = normalizeVariantLabel(field.label, field.key);
+        if (field.type === 'checkbox') {
+          if (value) variants[label] = ['Yes'];
+          return;
+        }
+        if (value == null) return;
+        if (Array.isArray(value)) {
+          const cleaned = value.map((v) => String(v).trim()).filter(Boolean);
+          if (cleaned.length) variants[label] = Array.from(new Set(cleaned));
+          return;
+        }
+        const trimmed = String(value).trim();
+        if (trimmed) variants[label] = [trimmed];
+      });
+      return variants;
     };
 
     // ---- Supabase Configuration ----
@@ -578,6 +632,15 @@
     const CABLE_RATINGS = POWER_RATINGS;
     const POWER_CAPACITY = ["10,000 mAh","20,000 mAh"];
 
+    const ORDER_STATUS_SEQUENCE = ['open','confirmed','shipped'];
+    const ORDER_STATUS_ALLOWED = ['open','confirmed','shipped','cancelled'];
+    const ORDER_STATUS_LABELS = {
+      open: 'Open',
+      confirmed: 'Confirmed',
+      shipped: 'Shipped',
+      cancelled: 'Cancelled',
+    };
+
     // ---- Small base catalogue (~12 items) ----
     /** @type {Product[]} */
     const CATALOG = [
@@ -713,10 +776,6 @@
     }
 
     function useFocusTrap(active, ref, onEscape){
-      const escapeRef = useRef(onEscape);
-      useEffect(() => {
-        escapeRef.current = onEscape;
-      }, [onEscape]);
       useEffect(()=>{
         if(!active || !ref.current) return;
         const root = ref.current;
@@ -733,7 +792,7 @@
           if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
         }
         const onKey = (e)=>{
-          if(e.key==='Escape'){ e.stopPropagation(); escapeRef.current?.(); }
+          if(e.key==='Escape'){ e.stopPropagation(); onEscape?.(); }
           if(e.key==='Tab' && list.length){ const first=list[0], last=list[list.length-1]; if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); } else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); } }
         };
         root.addEventListener('keydown', onKey);
@@ -747,24 +806,12 @@
             }
           }
         };
-      },[active, ref]);
+      },[active, ref, onEscape]);
     }
 
     function useBodyScrollLock(active, preferredScrollRef){
       const scrollRef = useRef(0);
       const previousStylesRef = useRef(null);
-      const prefersPassiveLock = useMemo(() => {
-        if (typeof navigator === 'undefined') return false;
-        const ua = navigator.userAgent || '';
-        const touchCapable = navigator.maxTouchPoints > 0;
-        if (!touchCapable) return false;
-        const isAppleDevice = /iP(ad|hone|od)/i.test(ua);
-        const isIOSChrome = /CriOS/i.test(ua);
-        const isIOSFirefox = /FxiOS/i.test(ua);
-        const isIOSEdge = /EdgiOS/i.test(ua);
-        const isIOSOpera = /OPiOS/i.test(ua);
-        return isAppleDevice || isIOSChrome || isIOSFirefox || isIOSEdge || isIOSOpera;
-      }, []);
 
       useLayoutEffect(() => {
         if (typeof window === 'undefined' || !active) return;
@@ -778,42 +825,14 @@
           : fallbackY;
 
         scrollRef.current = preferred;
-
         previousStylesRef.current = {
-          strategy: prefersPassiveLock ? 'passive' : 'fixed',
           position: body.style.position,
           top: body.style.top,
           width: body.style.width,
           overflow: body.style.overflow,
-          touchAction: body.style.touchAction,
-          webkitOverflowScrolling: body.style.webkitOverflowScrolling,
-          overscroll: body.style.overscrollBehavior,
-          overscrollY: body.style.overscrollBehaviorY,
           htmlOverflow: html.style.overflow,
-          htmlOverscroll: html.style.overscrollBehavior,
+          overscroll: html.style.overscrollBehavior
         };
-
-        if (prefersPassiveLock) {
-          body.style.overflow = 'hidden';
-          body.style.touchAction = 'pan-y';
-          body.style.webkitOverflowScrolling = 'auto';
-          body.style.overscrollBehavior = 'contain';
-          body.style.overscrollBehaviorY = 'contain';
-          html.style.overflow = 'hidden';
-          html.style.overscrollBehavior = 'contain';
-          return () => {
-            const prev = previousStylesRef.current || {};
-            body.style.overflow = prev.overflow || '';
-            body.style.touchAction = prev.touchAction || '';
-            body.style.webkitOverflowScrolling = prev.webkitOverflowScrolling || '';
-            body.style.overscrollBehavior = prev.overscroll || '';
-            body.style.overscrollBehaviorY = prev.overscrollY || '';
-            html.style.overflow = prev.htmlOverflow || '';
-            html.style.overscrollBehavior = prev.htmlOverscroll || '';
-            window.scrollTo(0, scrollRef.current || 0);
-            previousStylesRef.current = null;
-          };
-        }
 
         body.style.position = 'fixed';
         body.style.top = `-${preferred}px`;
@@ -829,78 +848,25 @@
           body.style.width = prev.width || '';
           body.style.overflow = prev.overflow || '';
           html.style.overflow = prev.htmlOverflow || '';
-          html.style.overscrollBehavior = prev.htmlOverscroll || '';
+          html.style.overscrollBehavior = prev.overscroll || '';
           window.scrollTo(0, scrollRef.current || 0);
           previousStylesRef.current = null;
         };
-      }, [active, preferredScrollRef, prefersPassiveLock]);
+      }, [active, preferredScrollRef]);
     }
 
     // ---- Cart state ----
     /** @typedef {{ id: string, name: string, sku: string, price: number, qty: number, variants?: Record<string,string> }} CartItem */
     function useCart(){
-      const normalizeCartItem = (item) => {
-        if (!item) return null;
-        const variants = item.variants && typeof item.variants === 'object' && !Array.isArray(item.variants) ? item.variants : {};
-        const inventoryKey = item.inventoryKey || buildVariantKey(variants);
-        const qty = Math.max(0, Number(item.qty) || 0);
-        return {
-          ...item,
-          variants,
-          inventoryKey,
-          qty,
-        };
-      };
-
       const [items, setItems] = useState(/** @type CartItem[] */([]));
       const [notes, setNotes] = useState("");
-
-      useEffect(() => {
-        try {
-          const raw = localStorage.getItem(CART_STORAGE_KEY);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed.items)) {
-              setItems(parsed.items.map(normalizeCartItem).filter(Boolean));
-            }
-            if (typeof parsed.notes === 'string') setNotes(parsed.notes);
-          }
-        } catch {}
-      }, []);
-
-      useEffect(() => {
-        try {
-          localStorage.setItem(CART_STORAGE_KEY, JSON.stringify({ items, notes }));
-        } catch {}
-      }, [items, notes]);
-
-      const add = (item) => setItems(prev => {
-        const normalized = normalizeCartItem(item);
-        if (!normalized) return prev;
-        const index = prev.findIndex(p =>
-          p.id === normalized.id &&
-          JSON.stringify(p.variants || {}) === JSON.stringify(normalized.variants || {}) &&
-          (p.inventoryKey || INVENTORY_BASE_KEY) === (normalized.inventoryKey || INVENTORY_BASE_KEY)
-        );
-        if (index >= 0) {
-          const next = [...prev];
-          next[index] = {
-            ...next[index],
-            qty: Math.max(0, Number(next[index].qty || 0) + normalized.qty),
-          };
-          return next;
-        }
-        return [...prev, normalized];
-      });
-
-      const updateQty = (index, qty) => setItems(prev => prev.map((it, i) =>
-        i === index ? { ...it, qty: Math.max(0, Number(qty) || 0) } : it
-      ));
-
-      const removeIndex = (index) => setItems(prev => prev.filter((_, i) => i !== index));
-      const clear = () => setItems([]);
-      const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);
-
+      useEffect(()=>{ try{ const raw=localStorage.getItem(CART_STORAGE_KEY); if(raw){ const p=JSON.parse(raw); if(Array.isArray(p.items)) setItems(p.items); if(typeof p.notes==='string') setNotes(p.notes);} }catch{} },[]);
+      useEffect(()=>{ try{ localStorage.setItem(CART_STORAGE_KEY, JSON.stringify({ items, notes })); }catch{} },[items,notes]);
+      const add = (item)=> setItems(prev=>{ const i=prev.findIndex(p=> p.id===item.id && JSON.stringify(p.variants||{})===JSON.stringify(item.variants||{})); if(i>=0){ const next=[...prev]; next[i]={...next[i], qty: next[i].qty + item.qty}; return next; } return [...prev, item]; });
+      const updateQty = (index, qty)=> setItems(prev=> prev.map((it,i)=> i===index? { ...it, qty: Math.max(0, Number(qty)||0)}: it));
+      const removeIndex = (index)=> setItems(prev=> prev.filter((_,i)=> i!==index));
+      const clear = ()=> setItems([]);
+      const subtotal = items.reduce((s,it)=> s + it.price*it.qty, 0);
       return { items, add, updateQty, removeIndex, clear, subtotal, notes, setNotes };
     }
 
@@ -1063,6 +1029,117 @@
       };
     }
 
+    const normalizeOrderRow = (row) => {
+      if (!row) return null;
+      const {
+        total_cents,
+        totalCents,
+        currency,
+        status,
+        order_items,
+        orderItems,
+        metadata,
+        ...rest
+      } = row;
+      const totalCentsValue = Number(total_cents ?? totalCents ?? 0);
+      const items = Array.isArray(order_items)
+        ? order_items
+        : Array.isArray(orderItems)
+          ? orderItems
+          : [];
+      const normalizedItems = items.map((item) => {
+        if (!item) return null;
+        const subtotal = Number(item.subtotal_cents ?? item.subtotalCents ?? ((Number(item.quantity ?? 0) || 0) * (Number(item.unit_price_cents ?? item.unitPriceCents ?? 0) || 0)));
+        return {
+          ...item,
+          quantity: Number(item.quantity ?? 0),
+          unit_price_cents: Number(item.unit_price_cents ?? item.unitPriceCents ?? 0),
+          subtotal_cents: subtotal,
+        };
+      }).filter(Boolean);
+
+      return {
+        ...rest,
+        status: (status || 'open').toLowerCase(),
+        total_cents: totalCentsValue,
+        currency: currency || OWNER_DEFAULT_CURRENCY,
+        metadata: metadata || {},
+        order_items: normalizedItems,
+      };
+    };
+
+    const orderTimestamp = (order) => {
+      if (!order) return 0;
+      const raw = order.created_at || order.createdAt || order.inserted_at || order.insertedAt;
+      const value = raw ? new Date(raw).getTime() : 0;
+      return Number.isFinite(value) ? value : 0;
+    };
+
+    const sortOrdersByCreatedDesc = (list) => {
+      const arr = Array.isArray(list) ? list : [];
+      return [...arr].sort((a, b) => orderTimestamp(b) - orderTimestamp(a));
+    };
+
+    function useOwnerOrders(){
+      const [orders, setOrders] = useState([]);
+      const [loadingOrders, setLoadingOrders] = useState(true);
+      const [ordersError, setOrdersError] = useState(null);
+      const [ordersMeta, setOrdersMeta] = useState(null);
+
+      const fetchOrders = React.useCallback(async () => {
+        try {
+          setLoadingOrders(true);
+          setOrdersError(null);
+          const response = await callOwnerApi('listOrders');
+          const rows = Array.isArray(response?.data) ? response.data : [];
+          const normalized = rows.map(normalizeOrderRow).filter(Boolean);
+          setOrders(sortOrdersByCreatedDesc(normalized));
+          setOrdersMeta(response?.meta || null);
+        } catch (error) {
+          console.error('Failed to load orders', error);
+          setOrdersError(error);
+          setOrders([]);
+          setOrdersMeta(null);
+        } finally {
+          setLoadingOrders(false);
+        }
+      }, []);
+
+      useEffect(() => {
+        fetchOrders();
+      }, [fetchOrders]);
+
+      const updateOrderStatus = React.useCallback(async (orderId, nextStatus) => {
+        if (!orderId || !nextStatus) return null;
+        try {
+          const response = await callOwnerApi('updateOrderStatus', { id: orderId, status: nextStatus });
+          const updated = normalizeOrderRow(response?.data);
+          if (updated) {
+            setOrders((prev) => {
+              const mapped = prev.map((order) => order.id === updated.id ? updated : order);
+              return sortOrdersByCreatedDesc(mapped);
+            });
+          }
+          return updated;
+        } catch (error) {
+          console.error('Failed to update order status', error);
+          if (error?.message && /404/.test(error.message)) {
+            throw new Error('Order no longer exists. Refresh the list and try again.');
+          }
+          throw new Error(error?.message || 'Unable to update order status. Please try again.');
+        }
+      }, []);
+
+      return {
+        orders,
+        loadingOrders,
+        ordersError,
+        ordersMeta,
+        refreshOrders: fetchOrders,
+        updateOrderStatus,
+      };
+    }
+
     // ---- Icon Components ----
     function Logo({ className }){ return React.createElement('svg', { className, fill: 'currentColor', viewBox: '0 0 24 24' }, React.createElement('path', { d: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z' })); }
     function SearchIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'm21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z' })); }
@@ -1070,7 +1147,443 @@
     function XIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M6 18L18 6M6 6l12 12' })); }
     function ArrowRight({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3' })); }
     function TrashIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'm14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.164a1.5 1.5 0 0 0-1.5 1.5v.916m7.5 0a48.667 48.667 0 0 0-7.5 0' })); }
+    function GaugeIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M12 13.5v2.25m2.598-9.05a6.75 6.75 0 1 1-5.196 0m7.346 9.591 1.263 1.263m-9.856-1.263L6.892 17.05m.944-4.117L5.4 8.5m13.2 0-2.436 4.433' })); }
+    function PlusCircleIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z' })); }
+    function ClipboardIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M9 5.25H7.5a2.25 2.25 0 0 0-2.25 2.25v9A2.25 2.25 0 0 0 7.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9A2.25 2.25 0 0 0 16.5 5.25H15m-6 0A1.5 1.5 0 0 1 10.5 3.75h3A1.5 1.5 0 0 1 15 5.25m-6 0v.75A1.5 1.5 0 0 0 10.5 7.5h3A1.5 1.5 0 0 0 15 6V5.25' })); }
+    function TruckIcon({ className }){ return React.createElement('svg', { className, fill: 'none', viewBox: '0 0 24 24', strokeWidth: 1.5, stroke: 'currentColor' }, React.createElement('path', { strokeLinecap: 'round', strokeLinejoin: 'round', d: 'M2.25 7.5h13.5v9h-13.5V7.5Zm13.5 0H18a2.25 2.25 0 0 1 1.8.9l1.95 2.6a2.25 2.25 0 0 1 .45 1.35v4.65h-2.25m-1.5 0a1.5 1.5 0 1 0-3 0m3 0H15.75m-9 0a1.5 1.5 0 1 0-3 0m3 0H3.75' })); }
     function WhatsAppIcon({ className }){ return React.createElement('svg', { className, fill: 'currentColor', viewBox: '0 0 24 24' }, React.createElement('path', { d: 'M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893A11.821 11.821 0 0 0 20.885 3.488' })); }
+
+    function StatusBadge({ status }){
+      const normalized = (status || '').toLowerCase();
+      const styles = normalized === 'confirmed'
+        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+        : normalized === 'shipped'
+        ? 'border-sky-200 bg-sky-50 text-sky-700'
+        : normalized === 'cancelled'
+        ? 'border-rose-200 bg-rose-50 text-rose-700'
+        : 'border-amber-200 bg-amber-50 text-amber-800';
+      return React.createElement('span', {
+        className: cx('inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize', styles),
+      }, ORDER_STATUS_LABELS[normalized] || normalized || 'Open');
+    }
+
+    function SummaryCard({ title, value, subtext, trend }){
+      return React.createElement('div', { className: 'rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm ring-1 ring-black/5 sm:p-5' },
+        React.createElement('p', { className: 'text-sm font-medium text-slate-500' }, title),
+        React.createElement('p', { className: 'mt-2 text-2xl font-semibold tracking-tight text-slate-900' }, value),
+        subtext && React.createElement('p', { className: 'mt-1 text-xs text-slate-500' }, subtext),
+        trend && React.createElement('div', { className: 'mt-3 inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700' }, trend)
+      );
+    }
+
+    function OwnerDashboardHome({ allProducts, ownerProducts, orders, loadingOrders, ordersMeta, ordersError, onNavigate, refreshOrders }){
+      const activeProducts = allProducts.filter(p => !p.hidden).length;
+      const overrides = ownerProducts.filter(p => p.sourceId && !p.hidden).length;
+      const netNew = ownerProducts.filter(p => !p.sourceId && !p.hidden).length;
+      const hidden = ownerProducts.filter(p => p.hidden).length;
+
+      const statusCounts = orders.reduce((acc, order) => {
+        const key = (order?.status || 'open').toLowerCase();
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {});
+      const pipelineStatuses = [...ORDER_STATUS_SEQUENCE, 'cancelled'];
+      const openOrders = statusCounts.open || 0;
+      const confirmedOrders = statusCounts.confirmed || 0;
+      const shippedOrders = statusCounts.shipped || 0;
+
+      const revenueCents = orders
+        .filter((order) => ['confirmed', 'shipped'].includes((order?.status || '').toLowerCase()))
+        .reduce((sum, order) => sum + (Number(order?.total_cents) || 0), 0);
+      const revenueLabel = new Intl.NumberFormat('en-GB', { style: 'currency', currency: CURRENCY }).format(revenueCents / 100);
+
+      const recentOrders = orders.slice(0, 5);
+
+      const handleNavigate = (target) => {
+        onNavigate?.(target);
+      };
+
+      return React.createElement('div', { className: 'flex flex-col gap-10' },
+        React.createElement('header', { className: 'flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between' },
+          React.createElement('div', null,
+            React.createElement('h1', { className: 'text-2xl font-semibold tracking-tight text-slate-900' }, 'Owner dashboard'),
+            React.createElement('p', { className: 'mt-1 text-sm text-slate-600' }, 'Monitor catalogue health and stay on top of incoming orders.')
+          )
+        ),
+
+        React.createElement('section', { className: 'grid gap-4 sm:grid-cols-2 xl:grid-cols-4' },
+          React.createElement(SummaryCard, { title: 'Active SKUs', value: activeProducts, subtext: overrides ? `${overrides} overrides` : undefined }),
+          React.createElement(SummaryCard, { title: 'Owner additions', value: netNew, subtext: hidden ? `${hidden} hidden` : 'Live to customers' }),
+          React.createElement(SummaryCard, { title: 'Open orders', value: loadingOrders ? '—' : openOrders, subtext: confirmedOrders ? `${confirmedOrders} confirmed` : 'Awaiting confirmation' }),
+          React.createElement(SummaryCard, { title: 'Fulfilled value', value: revenueLabel, subtext: shippedOrders ? `${shippedOrders} shipped` : 'No shipments yet' })
+        ),
+
+        React.createElement('section', { className: 'grid gap-6 lg:grid-cols-[minmax(0,1fr),minmax(0,1fr)]' },
+          React.createElement('div', { className: 'rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm ring-1 ring-black/5' },
+            React.createElement('div', { className: 'flex items-center justify-between gap-3' },
+              React.createElement('div', null,
+                React.createElement('h2', { className: 'text-base font-semibold text-slate-900' }, 'Order pipeline'),
+                React.createElement('p', { className: 'mt-1 text-sm text-slate-500' }, 'Track each stage to keep fulfilment moving.')
+              ),
+              React.createElement('button', {
+                type: 'button',
+                onClick: refreshOrders,
+                className: 'inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                disabled: loadingOrders
+              }, loadingOrders ? 'Refreshing…' : 'Refresh')
+            ),
+            ordersError ? (
+              /schema cache|relation "orders"/i.test(ordersError.message || '') ?
+                React.createElement('div', { className: 'mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900' },
+                  React.createElement('p', { className: 'font-medium' }, 'Orders table not detected'),
+                  React.createElement('p', { className: 'mt-1' }, 'Set up the orders tables & policies in Supabase, then refresh to start tracking customer purchase history.')
+                )
+              :
+                React.createElement('div', { className: 'mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900' },
+                  React.createElement('p', { className: 'font-medium' }, 'Orders could not be loaded'),
+                  React.createElement('p', { className: 'mt-1' }, ordersError.message || 'Check your connection or Supabase policies and try again.')
+                )
+            ) : ordersMeta?.missingOrdersTable ? (
+              React.createElement('div', { className: 'mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900' },
+                React.createElement('p', { className: 'font-medium' }, 'Orders table not detected'),
+                React.createElement('p', { className: 'mt-1' }, 'Set up the orders tables & policies in Supabase, then refresh to start tracking customer purchase history.')
+              )
+            ) : (
+              React.createElement('dl', { className: 'mt-6 grid grid-cols-1 gap-4 sm:grid-cols-4' },
+                pipelineStatuses.map((stage) => React.createElement('div', {
+                  key: stage,
+                  className: cx('rounded-xl border px-4 py-3 text-center flex flex-col items-center justify-center gap-1',
+                    stage === 'open' ? 'border-amber-200 bg-amber-50 text-amber-800' :
+                    stage === 'confirmed' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' :
+                    stage === 'shipped' ? 'border-sky-200 bg-sky-50 text-sky-700' :
+                    'border-rose-200 bg-rose-50 text-rose-700')
+                },
+                  React.createElement('dt', { className: 'text-[11px] font-medium uppercase tracking-wide' }, ORDER_STATUS_LABELS[stage] || stage),
+                  React.createElement('dd', { className: 'text-2xl font-semibold leading-none' }, loadingOrders ? '—' : (statusCounts[stage] || 0))
+                ))
+              )
+            )
+          ),
+          React.createElement('div', { className: 'rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm ring-1 ring-black/5' },
+            React.createElement('div', { className: 'flex items-center justify-between gap-3' },
+              React.createElement('div', null,
+                React.createElement('h2', { className: 'text-base font-semibold text-slate-900' }, 'Recent orders'),
+                React.createElement('p', { className: 'mt-1 text-sm text-slate-500' }, recentOrders.length ? 'Latest activity from verified customers.' : 'No orders yet — your list will appear here.')
+              ),
+              React.createElement('button', {
+                type: 'button',
+                onClick: () => handleNavigate('orders'),
+                className: 'inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+              }, 'Open orders')
+            ),
+            recentOrders.length > 0 && React.createElement('ul', { className: 'mt-5 space-y-3' },
+              recentOrders.map((order) => React.createElement('li', {
+                key: order.id,
+                className: 'rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm'
+              },
+                React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+                  React.createElement('div', null,
+                    React.createElement('p', { className: 'text-sm font-medium text-slate-900' }, order.customer_name || order.customer_email || 'Customer'),
+                    React.createElement('p', { className: 'text-xs text-slate-500' }, order.customer_email || 'Email pending')
+                  ),
+                  React.createElement(StatusBadge, { status: order.status })
+                ),
+                React.createElement('div', { className: 'mt-3 flex items-center justify-between text-xs text-slate-500' },
+                  React.createElement('span', null, new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(order.created_at || order.createdAt || Date.now()))),
+                  React.createElement('span', { className: 'font-medium text-slate-700' }, new Intl.NumberFormat('en-GB', { style: 'currency', currency: CURRENCY }).format((Number(order.total_cents) || 0) / 100))
+                )
+              ))
+            )
+          )
+        )
+      );
+    }
+
+    function OwnerOrdersBoard({ orders, loading, error, meta, onRefresh, onStatusChange, onNotify }){
+      const [activeStatus, setActiveStatus] = useState('open');
+      const [selectedId, setSelectedId] = useState(null);
+      const [updating, setUpdating] = useState(false);
+
+      const statusCounts = useMemo(() => orders.reduce((acc, order) => {
+        const key = (order?.status || 'open').toLowerCase();
+        acc[key] = (acc[key] || 0) + 1;
+        acc.all = (acc.all || 0) + 1;
+        return acc;
+      }, { all: 0 }), [orders]);
+
+      const statuses = useMemo(() => Array.from(new Set([...ORDER_STATUS_SEQUENCE, 'cancelled', 'all'])), []);
+
+      const filteredOrders = useMemo(() => {
+        if (activeStatus === 'all') return orders;
+        return orders.filter((order) => (order?.status || 'open').toLowerCase() === activeStatus);
+      }, [orders, activeStatus]);
+
+      useEffect(() => {
+        if (!filteredOrders.length) {
+          setSelectedId(null);
+          return;
+        }
+        if (!selectedId || !filteredOrders.some((order) => order.id === selectedId)) {
+          setSelectedId(filteredOrders[0]?.id || null);
+        }
+      }, [filteredOrders, selectedId]);
+
+      const selectedOrder = filteredOrders.find((order) => order.id === selectedId) || null;
+
+      const currencyFormatter = useMemo(() => new Intl.NumberFormat('en-GB', { style: 'currency', currency: CURRENCY }), []);
+      const formatCurrency = (cents) => currencyFormatter.format((Number(cents) || 0) / 100);
+      const formatDateTime = (value) => {
+        try {
+          return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+        } catch {
+          return '—';
+        }
+      };
+
+      const handleStatusAdvance = async (orderId, nextStatus) => {
+        const normalizedNextStatus = String(nextStatus || '').toLowerCase();
+        if (!orderId || !normalizedNextStatus) return;
+        if (!ORDER_STATUS_ALLOWED.includes(normalizedNextStatus)) {
+          onNotify?.('error', `Unsupported status transition: ${nextStatus}`);
+          return;
+        }
+        try {
+          setUpdating(true);
+          const updated = await onStatusChange?.(orderId, normalizedNextStatus);
+          if (updated) {
+            const label = ORDER_STATUS_LABELS[normalizedNextStatus] || normalizedNextStatus;
+            onNotify?.('success', `Order status updated to ${label}.`);
+          }
+        } catch (err) {
+          console.error('Failed to update order status', err);
+          onNotify?.('error', err?.message || 'Unable to update order status right now.');
+        } finally {
+          setUpdating(false);
+        }
+      };
+
+      if (meta?.missingOrdersTable) {
+        return React.createElement('div', { className: 'rounded-2xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900 shadow-sm' },
+          React.createElement('h2', { className: 'text-base font-semibold text-amber-900' }, 'Orders table not detected'),
+          React.createElement('p', { className: 'mt-2' }, 'Create the orders and order_items tables in Supabase, apply RLS policies, then refresh this view to start tracking customer history.'),
+          React.createElement('div', { className: 'mt-4 flex flex-wrap gap-2 text-xs' },
+            React.createElement('span', { className: 'rounded-full border border-amber-300 bg-white px-3 py-1 text-amber-700' }, 'orders'),
+            React.createElement('span', { className: 'rounded-full border border-amber-300 bg-white px-3 py-1 text-amber-700' }, 'order_items')
+          ),
+          React.createElement('button', {
+            type: 'button',
+            onClick: onRefresh,
+            className: 'mt-4 inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-4 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-amber-500'
+          }, 'Refresh')
+        );
+      }
+
+      if (error) {
+        const message = error?.message || '';
+        if (/schema cache|relation "orders"/i.test(message)) {
+          return React.createElement('div', { className: 'rounded-2xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900 shadow-sm' },
+            React.createElement('h2', { className: 'text-base font-semibold text-amber-900' }, 'Orders table not detected'),
+            React.createElement('p', { className: 'mt-2' }, 'Create the orders and order_items tables in Supabase, apply RLS policies, then refresh this view to start tracking customer history.'),
+            React.createElement('div', { className: 'mt-4 flex flex-wrap gap-2 text-xs' },
+              React.createElement('span', { className: 'rounded-full border border-amber-300 bg-white px-3 py-1 text-amber-700' }, 'orders'),
+              React.createElement('span', { className: 'rounded-full border border-amber-300 bg-white px-3 py-1 text-amber-700' }, 'order_items')
+            ),
+            React.createElement('button', {
+              type: 'button',
+              onClick: onRefresh,
+              className: 'mt-4 inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-4 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-amber-500'
+            }, 'Refresh')
+          );
+        }
+        return React.createElement('div', { className: 'rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-900 shadow-sm' },
+          React.createElement('h2', { className: 'text-base font-semibold text-rose-900' }, 'Unable to load orders'),
+          React.createElement('p', { className: 'mt-2' }, error.message || 'Check your connection or Supabase permissions and try again.'),
+          React.createElement('button', {
+            type: 'button',
+            onClick: onRefresh,
+            className: 'mt-4 inline-flex items-center gap-2 rounded-full border border-rose-300 bg-white px-4 py-2 text-xs font-medium text-rose-700 hover:bg-rose-100 focus:outline-none focus-visible:outline-2 focus-visible:outline-rose-500'
+          }, 'Retry')
+        );
+      }
+
+      return React.createElement('div', { className: 'flex flex-col gap-6' },
+        React.createElement('header', { className: 'flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between' },
+          React.createElement('div', null,
+            React.createElement('h2', { className: 'text-xl font-semibold text-slate-900' }, 'Orders pipeline'),
+            React.createElement('p', { className: 'text-sm text-slate-600' }, 'Move orders from open to shipped, while keeping a full audit trail.')
+          ),
+          React.createElement('div', { className: 'flex flex-wrap gap-2 text-xs text-slate-500' },
+            React.createElement('span', { className: 'rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700' }, `Open: ${statusCounts.open || 0}`),
+            React.createElement('span', { className: 'rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700' }, `Confirmed: ${statusCounts.confirmed || 0}`),
+            React.createElement('span', { className: 'rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-sky-700' }, `Shipped: ${statusCounts.shipped || 0}`),
+            React.createElement('button', {
+              type: 'button',
+              onClick: onRefresh,
+              className: 'inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1 text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+            }, loading ? 'Refreshing…' : 'Refresh')
+          )
+        ),
+
+        React.createElement('div', { className: 'flex flex-wrap gap-2' },
+          statuses.map((status) => React.createElement('button', {
+            key: status,
+            type: 'button',
+            onClick: () => setActiveStatus(status),
+            className: cx(
+              'rounded-full border px-3 py-1.5 text-xs font-medium transition focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+              activeStatus === status
+                ? 'border-brand bg-[var(--brand-soft-strong)] text-brand shadow-sm'
+                : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+            )
+          }, status === 'all' ? 'All' : ORDER_STATUS_LABELS[status] || status))
+        ),
+
+        loading && !orders.length ? React.createElement('div', { className: 'flex items-center justify-center rounded-2xl border border-slate-200 bg-white/80 p-10 text-slate-500' }, 'Loading orders…') :
+        !filteredOrders.length ? React.createElement('div', { className: 'rounded-2xl border border-slate-200 bg-white/80 p-8 text-sm text-slate-500' }, 'No orders in this stage yet.') :
+        React.createElement('div', { className: 'grid gap-6 lg:grid-cols-[minmax(0,1fr),minmax(0,360px)]' },
+          React.createElement('div', { className: 'space-y-3' },
+            filteredOrders.map((order) => React.createElement('button', {
+              key: order.id,
+              type: 'button',
+              onClick: () => setSelectedId(order.id),
+              className: cx(
+                'w-full rounded-2xl border px-4 py-3 text-left shadow-sm transition focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                order.id === selectedId ? 'border-brand bg-[var(--brand-soft-strong)]/70 text-slate-900 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300'
+              )
+            },
+              React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+                React.createElement('div', null,
+                  React.createElement('p', { className: 'text-sm font-semibold text-slate-900' }, order.customer_name || 'Customer'),
+                  React.createElement('p', { className: 'text-xs text-slate-500' }, order.customer_email || 'Email pending')
+                ),
+                React.createElement(StatusBadge, { status: order.status })
+              ),
+              React.createElement('div', { className: 'mt-3 flex items-center justify-between text-xs text-slate-500' },
+                React.createElement('span', null, formatDateTime(order.created_at || order.createdAt)),
+                React.createElement('span', { className: 'font-medium text-slate-700' }, formatCurrency(order.total_cents))
+              )
+            ))
+          ),
+          React.createElement('aside', { className: 'rounded-2xl border border-slate-200 bg-white/90 p-5 shadow-sm' },
+            selectedOrder ? React.createElement('div', { className: 'flex flex-col gap-4' },
+              React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+                React.createElement('div', null,
+                  React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, selectedOrder.customer_name || 'Customer'),
+                  React.createElement('p', { className: 'text-xs text-slate-500' }, selectedOrder.customer_email || 'Email pending')
+                ),
+                React.createElement(StatusBadge, { status: selectedOrder.status })
+              ),
+              React.createElement('dl', { className: 'grid grid-cols-2 gap-3 text-xs text-slate-500' },
+                React.createElement('div', null,
+                  React.createElement('dt', { className: 'font-medium uppercase tracking-wide text-slate-600' }, 'Placed'),
+                  React.createElement('dd', { className: 'mt-1 text-slate-700' }, formatDateTime(selectedOrder.created_at || selectedOrder.createdAt))
+                ),
+                React.createElement('div', null,
+                  React.createElement('dt', { className: 'font-medium uppercase tracking-wide text-slate-600' }, 'Total'),
+                  React.createElement('dd', { className: 'mt-1 text-slate-700 font-semibold' }, formatCurrency(selectedOrder.total_cents))
+                ),
+                selectedOrder.updated_at && React.createElement('div', { className: 'col-span-2' },
+                  React.createElement('dt', { className: 'font-medium uppercase tracking-wide text-slate-600' }, 'Updated'),
+                  React.createElement('dd', { className: 'mt-1 text-slate-700' }, formatDateTime(selectedOrder.updated_at))
+                )
+              ),
+              selectedOrder.order_items && selectedOrder.order_items.length > 0 && React.createElement('div', null,
+                React.createElement('h4', { className: 'text-sm font-semibold text-slate-800' }, 'Items'),
+                React.createElement('ul', { className: 'mt-3 space-y-3' },
+                  selectedOrder.order_items.map((item) => React.createElement('li', { key: item.id || `${item.product_id}-${item.sku}` },
+                    React.createElement('div', { className: 'flex items-start justify-between gap-3 text-sm text-slate-700' },
+                      React.createElement('div', null,
+                        React.createElement('p', { className: 'font-medium text-slate-900' }, item.name || 'Item'),
+                        item.sku && React.createElement('p', { className: 'text-xs text-slate-500' }, 'SKU: ', item.sku)
+                      ),
+                      React.createElement('span', { className: 'text-xs text-slate-500' }, `×${item.quantity || 0}`)
+                    ),
+                    item.variants && Object.keys(item.variants).length > 0 && React.createElement('div', { className: 'mt-1 flex flex-wrap gap-1 text-xs text-slate-600' },
+                      Object.entries(item.variants).map(([key, rawValue]) => {
+                        const value = Array.isArray(rawValue) ? rawValue.join(', ') : rawValue;
+                        const isColor = /color/i.test(key);
+                        return React.createElement('span', {
+                          key: key,
+                          className: cx('inline-flex items-center gap-1 rounded-full border px-2 py-0.5',
+                            isColor ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white')
+                        },
+                          isColor ? React.createElement(ColorDot, { name: value }) : null,
+                          `${key}: ${value}`
+                        );
+                      })
+                    ),
+                    React.createElement('div', { className: 'mt-1 flex items-center justify-between text-xs text-slate-500' },
+                      React.createElement('span', null, formatCurrency(item.unit_price_cents)),
+                      React.createElement('span', { className: 'font-medium text-slate-700' }, formatCurrency(item.subtotal_cents))
+                    )
+                  ))
+                )
+              ),
+              (selectedOrder.note || selectedOrder.metadata?.notes) && React.createElement('div', { className: 'rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600' },
+                selectedOrder.note || selectedOrder.metadata?.notes
+              ),
+              React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                (() => {
+                  const status = (selectedOrder.status || 'open').toLowerCase();
+                  const actions = [];
+                  if (status === 'open') {
+                    actions.push({ label: 'Mark as confirmed', next: 'confirmed' });
+                    actions.push({ label: 'Cancel order', next: 'cancelled', variant: 'danger' });
+                  }
+                  if (status === 'confirmed') {
+                    actions.push({ label: 'Mark as shipped', next: 'shipped' });
+                    actions.push({ label: 'Cancel order', next: 'cancelled', variant: 'danger' });
+                  }
+                  return actions.map((action) => React.createElement('button', {
+                    key: action.next,
+                    type: 'button',
+                    onClick: () => handleStatusAdvance(selectedOrder.id, action.next),
+                    disabled: updating,
+                    className: cx(
+                      'inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-medium shadow-sm focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                      action.variant === 'danger'
+                        ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                        : action.next === 'shipped'
+                          ? 'border-sky-300 bg-sky-50 text-sky-700 hover:bg-sky-100'
+                          : 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100',
+                      updating ? 'opacity-60' : ''
+                    )
+                  }, updating ? 'Updating…' : action.label));
+                })()
+              )
+            ) : React.createElement('p', { className: 'text-sm text-slate-500' }, filteredOrders.length ? 'Select an order to see its breakdown.' : 'No orders in this stage yet.')
+          )
+        )
+      );
+    }
+
+    function OwnerConsole({ views, section, onSectionChange }){
+      const current = views.find((view) => view.id === section) || views[0];
+      return React.createElement('main', { id: 'main', className: 'mx-auto w-full max-w-7xl px-4 pb-16 pt-6 sm:px-6 lg:px-8' },
+        React.createElement('div', { className: 'grid gap-6 lg:grid-cols-[minmax(200px,240px),minmax(0,1fr)]' },
+          React.createElement('nav', { className: 'flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0' },
+            views.map((view) => React.createElement('button', {
+              key: view.id,
+              type: 'button',
+              onClick: () => onSectionChange(view.id),
+              className: cx(
+                'snap-start rounded-2xl border px-4 py-3 text-left shadow-sm transition focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                view.id === current.id
+                  ? 'border-brand bg-brand-soft text-brand'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+              )
+            },
+              view.icon ? React.createElement(view.icon, { className: 'mb-2 h-5 w-5 text-current' }) : null,
+              React.createElement('span', { className: 'block text-sm font-semibold' }, view.label),
+              view.description && React.createElement('span', { className: 'mt-1 block text-xs text-slate-500' }, view.description)
+            ))
+          ),
+          React.createElement('section', { className: 'min-h-[480px]' },
+            current?.element || React.createElement('p', { className: 'text-sm text-slate-500' }, 'Select a section to begin.')
+          )
+        )
+      );
+    }
 
     // ---- Components ----
     function SkipLink(){
@@ -1170,7 +1683,6 @@
         )
       );
     }
-
     function Hero(){
       const steps = [
         { title: '1. Browse products', detail: 'Search or tap a category to find what you need.' },
@@ -1267,8 +1779,8 @@
         };
       }, []);
 
-      const wrapperClasses = cx(
-        'chip-scroll -mx-4',
+      const containerClasses = cx(
+        'relative -mx-4 overflow-x-auto px-4 chip-scroll-fade',
         fade.left && 'show-left',
         fade.right && 'show-right'
       );
@@ -1276,21 +1788,19 @@
       return React.createElement(React.Fragment, null,
         React.createElement('div', { className: 'sticky top-[var(--header-offset,64px)] z-30 border-b border-[var(--surface-border)] bg-[rgba(246,247,251,0.85)] backdrop-blur-lg' },
           React.createElement('div', { className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8', 'aria-label': 'Categories' },
-            React.createElement('div', { className: wrapperClasses },
-              React.createElement('div', { ref: containerRef, className: 'chip-scroll-inner overflow-x-auto px-4' },
-                React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
-                  CATEGORIES.map((cat)=> React.createElement('button', {
-                    key: cat,
-                    onClick: ()=> setActive(cat),
-                    'aria-pressed': active===cat,
-                    className: cx(
-                      'inline-flex items-center whitespace-nowrap rounded-full border px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
-                      active===cat
-                        ? 'border-transparent bg-brand text-white shadow-sm'
-                        : 'border-[var(--surface-border)] bg-white/70 text-slate-600 hover:text-slate-900 hover:bg-white/90'
-                    )
-                  }, cat))
-                )
+            React.createElement('div', { ref: containerRef, className: containerClasses },
+              React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
+                CATEGORIES.map((cat)=> React.createElement('button', {
+                  key: cat,
+                  onClick: ()=> setActive(cat),
+                  'aria-pressed': active===cat,
+                  className: cx(
+                    'inline-flex items-center whitespace-nowrap rounded-full border px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                    active===cat
+                      ? 'border-transparent bg-brand text-white shadow-sm'
+                      : 'border-[var(--surface-border)] bg-white/70 text-slate-600 hover:text-slate-900 hover:bg-white/90'
+                  )
+                }, cat))
               )
             )
           )
@@ -2402,7 +2912,7 @@
       return React.createElement(
         'section',
         { 'aria-labelledby': 'owner-title', className: 'mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8' },
-        React.createElement('div', { className: 'glass-card space-y-6 rounded-3xl p-6 sm:p-8' },
+        React.createElement('div', { className: 'space-y-6 rounded-3xl border border-[var(--surface-border)] bg-white/95 p-6 sm:p-8 shadow-soft-xl' },
           React.createElement('div', { className: 'space-y-2' },
             React.createElement('h2', { id: 'owner-title', className: 'text-2xl font-semibold text-slate-900' }, 'Owner — Add products'),
             React.createElement('p', { className: 'text-sm text-slate-600' }, 'Only essentials. Fields shift by category. Keep data clean; the catalogue updates instantly.')
@@ -2622,7 +3132,7 @@
             <div className="grid gap-4 p-4 sm:grid-cols-2">
               {/* Left: big image + arrows + thumbnails + add/remove */}
               <div className="flex flex-col gap-2">
-                <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-gray-100">
+                <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-slate-100">
                   <img
                     src={resolveImageSrc(images[galleryIndex] || '', product.name)}
                     onError={(e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }}
@@ -2771,26 +3281,27 @@
 
       return (
         React.createElement('section', { 'aria-labelledby': 'mgr-title', className: 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6' },
-          React.createElement('div', { className: 'sticky top-[var(--header-offset,64px)] z-30 border-b border-[var(--surface-border)] bg-[rgba(246,247,251,0.85)] backdrop-blur-lg' },
-            React.createElement('div', { className: 'flex items-center justify-between gap-3 py-2' },
-              React.createElement('h2', { id: 'mgr-title', className: 'text-base sm:text-lg font-semibold text-slate-900' }, 'Owner — Manage catalogue'),
-              React.createElement('div', { className: 'flex items-center gap-2' },
-                React.createElement('label', { className: 'relative' },
-                  React.createElement('span', { className: 'sr-only' }, 'Search'),
-                  React.createElement('input', {
-                    value: search,
-                    onChange: (e)=> setSearch(e.target.value),
-                    placeholder: 'Search…',
-                    type: 'search',
-                    className: 'w-48 sm:w-64 rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2 text-sm font-medium text-slate-600 shadow-inner backdrop-blur placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent'
-                  }),
-                  React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400' })
-                ),
-                React.createElement('button', { onClick: onClose, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Back')
+          React.createElement('div', { className: 'space-y-6 rounded-3xl border border-[var(--surface-border)] bg-white/95 p-6 shadow-soft-xl sm:p-8' },
+            React.createElement('div', { className: 'sticky top-[calc(var(--header-offset,64px)+12px)] z-10 rounded-2xl border border-[var(--surface-border)] bg-white/90 px-4 py-3 shadow-sm backdrop-blur' },
+              React.createElement('div', { className: 'flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between' },
+                React.createElement('h2', { id: 'mgr-title', className: 'text-base sm:text-lg font-semibold text-slate-900' }, 'Owner — Manage catalogue'),
+                React.createElement('div', { className: 'flex items-center gap-2' },
+                  React.createElement('label', { className: 'relative flex-1 sm:w-auto' },
+                    React.createElement('span', { className: 'sr-only' }, 'Search'),
+                    React.createElement('input', {
+                      value: search,
+                      onChange: (e)=> setSearch(e.target.value),
+                      placeholder: 'Search…',
+                      type: 'search',
+                      className: 'w-full rounded-full border border-[var(--surface-border)] bg-white px-3.5 py-2 text-sm font-medium text-slate-600 shadow-inner placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent'
+                    }),
+                    React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400' })
+                  ),
+                  React.createElement('button', { onClick: onClose, className: 'rounded-full border border-[var(--surface-border)] bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white/90 focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Back')
+                )
               )
-            )
-          ),
-          React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition hover:-translate-y-0.5 hover:shadow-soft-xl' }, React.createElement('div', { className: 'aspect-square w-full bg-gray-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-slate-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 text-xs font-medium text-slate-600' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-slate-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-muted' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white' }, 'Hide')))))) ,
+            ),
+            React.createElement('div', { className: 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white transition hover:-translate-y-0.5 hover:shadow-soft-xl' }, React.createElement('div', { className: 'aspect-square w-full bg-slate-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-slate-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 text-xs font-medium text-slate-600' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-slate-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-muted' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-[var(--surface-border)] bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white/90' }, 'Hide')))))) ),
           React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, onSave: onSave, onHide: onHide, onDelete: onDelete })
         )
       );
@@ -2798,17 +3309,21 @@
 
     // ---- Main App ----
     function App(){
-      const [products, setProducts] = useState(CATALOG);
       const lastCatalogScrollRef = React.useRef(0);
       const [search, setSearch] = useState("");
       const [category, setCategory] = useState("All");
       const [selectedProduct, setSelectedProduct] = useState(null);
       const [cartOpen, setCartOpen] = useState(false);
-      const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
+      const [ownerSection, setOwnerSection] = useState('dashboard');
       const [ownerModeState, setOwnerModeState] = useState(DEFAULT_OWNER_MODE && OWNER_ACCESS_ENABLED);
       const ownerMode = OWNER_PORTAL_ONLY ? true : (OWNER_ACCESS_ENABLED ? ownerModeState : false);
       const cart = useCart();
       const toggleOwnerMode = OWNER_TOGGLE_ENABLED ? setOwnerModeState : () => {};
+      useEffect(() => {
+        if (!ownerMode) {
+          setOwnerSection('dashboard');
+        }
+      }, [ownerMode]);
       const [notice, setNotice] = useState(null);
       const noticeTimerRef = useRef(null);
       const pushNotice = (type, message) => {
@@ -2821,6 +3336,7 @@
         if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       }, []);
       const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
+      const { orders, loadingOrders, ordersError, ordersMeta, refreshOrders, updateOrderStatus } = useOwnerOrders();
 
       const shouldLockScroll = Boolean(selectedProduct || cartOpen);
       useBodyScrollLock(shouldLockScroll, lastCatalogScrollRef);
@@ -2858,19 +3374,17 @@
         if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()) || (p.description || '').toLowerCase().includes(search.toLowerCase()));
         return filtered;
       }, [allProducts, category, search]);
-      const productLookup = useMemo(() => {
-        const map = new Map();
-        allProducts.forEach((p) => {
-          if (p && p.id) map.set(p.id, p);
-        });
-        return map;
-      }, [allProducts]);
 
       // Functions already provided by useOwnerProducts hook
-      const removeProduct = deleteProduct; // Alias for compatibility
-
-      // expose owner manager setter globally
-      useEffect(()=> { window.__setOwnerManage = setOwnerManage; return ()=> { window.__setOwnerManage = undefined; }; }, []);
+      // expose owner manager setter globally for legacy buttons
+      useEffect(() => {
+        window.__setOwnerManage = (open) => {
+          setOwnerSection(open ? 'manage' : 'dashboard');
+        };
+        return () => {
+          window.__setOwnerManage = undefined;
+        };
+      }, []);
 
       const upsertOwner = (p) => setOwnerProducts(prev => {
         const i = prev.findIndex(x => x.id === p.id);
@@ -2933,6 +3447,67 @@
         return success;
       };
 
+      const ownerDashboardElement = useMemo(() => React.createElement(OwnerDashboardHome, {
+        allProducts,
+        ownerProducts,
+        orders,
+        loadingOrders,
+        ordersMeta,
+        ordersError,
+        onNavigate: setOwnerSection,
+        refreshOrders,
+      }), [allProducts, ownerProducts, orders, loadingOrders, ordersMeta, ordersError, refreshOrders]);
+
+      const ownerViews = useMemo(() => [
+        {
+          id: 'dashboard',
+          label: 'Dashboard',
+          description: 'Key metrics & recents',
+          icon: GaugeIcon,
+          element: ownerDashboardElement,
+        },
+        {
+          id: 'add',
+          label: 'Add product',
+          description: 'Create new catalogue items',
+          icon: PlusCircleIcon,
+          element: React.createElement(OwnerPage, {
+            addProduct,
+            onNotify: pushNotice,
+            onNavigate: setOwnerSection,
+          }),
+        },
+        {
+          id: 'manage',
+          label: 'Manage catalogue',
+          description: 'Edit overrides & hide base items',
+          icon: ClipboardIcon,
+          element: React.createElement(OwnerManager, {
+            products: allProducts,
+            onClose: () => setOwnerSection('add'),
+            onEdit: (p) => setSelectedProduct({ __edit: true, product: p }),
+            onHide: (baseId) => hideBase(baseId),
+            onDelete: (id) => deleteOwnerProduct(id),
+            onSave: saveEdit,
+          }),
+        },
+        {
+          id: 'orders',
+          label: 'Orders',
+          description: 'Track open, confirmed & shipped',
+          icon: TruckIcon,
+          element: React.createElement(OwnerOrdersBoard, {
+            orders,
+            loading: loadingOrders,
+            error: ordersError,
+            meta: ordersMeta,
+            onRefresh: refreshOrders,
+            onStatusChange: updateOrderStatus,
+            onNotify: pushNotice,
+          }),
+        },
+      ], [ownerDashboardElement, allProducts, orders, loadingOrders, ordersError, ordersMeta, refreshOrders, updateOrderStatus, deleteOwnerProduct, hideBase, saveEdit, setOwnerSection, pushNotice]);
+
   const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
 
       // Show loading state while products are loading
@@ -2955,11 +3530,7 @@
         ),
   React.createElement(Header, { onOpenCart: ()=> { lastCatalogScrollRef.current = window.scrollY || 0; setCartOpen(true); }, search, setSearch, ownerMode, setOwnerMode: toggleOwnerMode, cartQty, connectionStatus, allowOwnerToggle: OWNER_TOGGLE_ENABLED }),
         ownerMode ? (
-          ownerManage ? (
-            React.createElement(OwnerManager, { products: allProducts, onClose: ()=> setOwnerManage(false), onEdit: (p)=> { lastCatalogScrollRef.current = window.scrollY || 0; setSelectedProduct({ __edit: true, product: p }); }, onHide: (baseId)=> hideBase(baseId), onDelete: (id)=> deleteOwnerProduct(id), onSave: saveEdit })
-          ) : (
-            React.createElement(OwnerPage, { addProduct: addProduct, products: ownerProducts, removeProduct: (id)=> deleteOwnerProduct(id), onNotify: pushNotice })
-          )
+          React.createElement(OwnerConsole, { views: ownerViews, section: ownerSection, onSectionChange: setOwnerSection })
         ) : (
           React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
             products: filteredProducts, 
@@ -2974,22 +3545,63 @@
           onClose: ()=> {
             setSelectedProduct(null);
           }, 
-          onAdd: cart.add,
-          cartItems: cart.items
+          onAdd: cart.add 
         }),
-        React.createElement(CartDrawer, { open: cartOpen, onClose: ()=> setCartOpen(false), cart, productLookup })
+        React.createElement(CartDrawer, { open: cartOpen, onClose: ()=> setCartOpen(false), cart })
       );
     }
 
     // ---- Render ----
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(App));
+      };
+
+      const showLockScreen = () => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,0.9);z-index:9999;padding:24px;';
+        overlay.innerHTML = `
+          <div style="width:100%;max-width:360px;padding:32px;border-radius:16px;background:white;box-shadow:0 20px 45px rgba(15,23,42,0.35);font-family:system-ui,-apple-system,Segoe UI,sans-serif;">
+            <h1 style="margin:0 0 12px;font-size:22px;font-weight:600;color:#111827;">Owner Access</h1>
+            <p style="margin:0 0 16px;font-size:14px;color:#4B5563;">Enter the owner password to manage the catalogue.</p>
+            <form style="display:flex;flex-direction:column;gap:12px;">
+              <input type="password" placeholder="Password" style="width:100%;border:1px solid #D1D5DB;border-radius:8px;padding:10px 12px;font-size:14px;" required />
+              <div data-status style="min-height:18px;font-size:13px;color:#DC2626;"></div>
+              <button type="submit" style="border:none;border-radius:8px;background:#4F46E5;color:white;padding:10px 12px;font-size:14px;font-weight:600;cursor:pointer;">Unlock</button>
+            </form>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        const form = overlay.querySelector('form');
+        const input = overlay.querySelector('input[type=password]');
+        const status = overlay.querySelector('[data-status]');
+        input.focus();
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const value = input.value.trim();
+          if (value === OWNER_PASSWORD) {
+            sessionStorage.setItem(OWNER_AUTH_KEY, 'true');
+            overlay.remove();
+            mountApp();
+          } else {
+            status.textContent = 'Incorrect password. Please try again.';
+            input.value = '';
+            input.focus();
+          }
+        });
+      };
+
+      if (sessionStorage.getItem(OWNER_AUTH_KEY) === 'true') {
+        mountApp();
+      } else {
+        showLockScreen();
+      }
+    })();
   </script>
 
   <!-- Deployment version marker -->
   <div id="build-version" class="text-center text-[10px] text-slate-400 py-6 select-none">
     Build 28b6f92 – deployed at <span id="build-ts"></span>
-    <button onclick="window.location.reload(true)" class="ml-4 px-2 py-1 text-[9px] bg-gray-200 hover:bg-gray-300 rounded transition-colors">
+    <button onclick="window.location.reload(true)" class="ml-4 px-2 py-1 text-[9px] bg-slate-200 hover:bg-slate-300 rounded transition-colors">
       🔄 Force Refresh
     </button>
     <button onclick="navigator.share ? navigator.share({title:'Odil Accessories', url:window.location.href}) : navigator.clipboard.writeText(window.location.href).then(()=>alert('Link copied!'))" class="ml-2 px-2 py-1 text-[9px] bg-blue-200 hover:bg-blue-300 rounded transition-colors">
