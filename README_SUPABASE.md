@@ -2,6 +2,15 @@ Supabase deployment guide
 
 This project is a static site (single `index.html`) and can be hosted on Supabase Sites or Supabase Storage.
 
+Security note (recommended for real use)
+----------------------------------------
+This repo includes an owner console (`owner.html`) and a customer catalogue (`index.html`).
+
+If you send the customer link to multiple people, treat it as "public enough" and protect your catalogue:
+
+- Run `supabase-owner-rls.sql` to make `products` read-only for `anon` and write-only for approved owners.
+- Create an Auth user for yourself (email+password) and add your user UUID to `public.owner_users`.
+
 Two recommended approaches:
 
 1) Quick: Use Supabase Storage (manual upload)

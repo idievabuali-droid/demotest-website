@@ -36,12 +36,18 @@ DROP POLICY IF EXISTS "Public delete" ON public.products;
 DROP POLICY IF EXISTS "public all" ON public.products;
 DROP POLICY IF EXISTS "public_all_access" ON public.products;
 
--- 5. Create a comprehensive policy for anonymous users (demo purposes)
-CREATE POLICY "demo_all_access" ON public.products
-FOR ALL
-TO anon, authenticated
-USING (true)
-WITH CHECK (true);
+-- 5. IMPORTANT SECURITY NOTE
+-- This script historically created a demo policy that allowed anonymous write access.
+-- For production (even "semi-private" catalogue links), use `supabase-owner-rls.sql`
+-- to make the catalogue read-only for customers and owner-only for edits.
+--
+-- If you still want the old demo behavior, uncomment the policy below:
+--
+-- CREATE POLICY "demo_all_access" ON public.products
+-- FOR ALL
+-- TO anon, authenticated
+-- USING (true)
+-- WITH CHECK (true);
 
 -- 6. Enable realtime for the products table
 -- First, make sure the table is in the realtime publication
@@ -57,9 +63,11 @@ BEGIN
   END IF;
 END $$;
 
--- 7. Grant necessary permissions
-GRANT ALL ON public.products TO anon;
-GRANT ALL ON public.products TO authenticated;
+-- 7. Permissions (safe defaults: read for anon, write for authenticated)
+REVOKE ALL ON public.products FROM anon;
+REVOKE ALL ON public.products FROM authenticated;
+GRANT SELECT ON public.products TO anon, authenticated;
+GRANT INSERT, UPDATE, DELETE ON public.products TO authenticated;
 GRANT USAGE ON SCHEMA public TO anon;
 GRANT USAGE ON SCHEMA public TO authenticated;
 
