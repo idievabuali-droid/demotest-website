@@ -6,6 +6,7 @@ node_modules/
 old_site_backup_*/
 full_backup_*.zip
 *.zip
+.tmp/
 *.bak*
 *.prev_commit
 *.committed

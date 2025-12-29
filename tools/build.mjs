@@ -18,6 +18,24 @@ async function esbuild(args) {
   });
 }
 
+async function tailwind(args) {
+  const isWin = process.platform === "win32";
+  const bin = isWin ? "npx.cmd" : "npx";
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(bin, ["--yes", "tailwindcss", ...args], {
+      stdio: "inherit",
+      windowsHide: true,
+      shell: isWin,
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`tailwindcss exited with code ${code}`));
+    });
+  });
+}
+
 async function main() {
   const common = [
     "--format=iife",
@@ -30,6 +48,7 @@ async function main() {
 
   await esbuild(["src/customer.jsx", "--outfile=customer.js", ...common]);
   await esbuild(["src/owner.jsx", "--outfile=owner.js", ...common]);
+  await tailwind(["-i", "tailwind.input.css", "-o", "styles.css", "--minify"]);
 }
 
 main().catch((err) => {
