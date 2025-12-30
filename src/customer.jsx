@@ -150,11 +150,26 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       }
     };
 
+    const getOwnerAuthHeader = async () => {
+      try {
+        if (!supabase) return null;
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        return token ? `Bearer ${token}` : null;
+      } catch {
+        return null;
+      }
+    };
+
     const callOwnerApi = async (action, payload) => {
       try {
+        const authHeader = await getOwnerAuthHeader();
         const response = await fetch(OWNER_API_ENDPOINT, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authHeader ? { Authorization: authHeader } : {}),
+          },
           body: JSON.stringify({ action, data: payload }),
         });
         if (!response.ok) {

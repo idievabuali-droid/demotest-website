@@ -4,7 +4,9 @@
   "private": true,
   "description": "Minimal starter scaffold created by GitHub Copilot",
   "scripts": {
-    "start": "python -m http.server 5173",
+    "dev": "live-server --port=5173",
+    "start": "npm run dev",
+    "start:py": "python -m http.server 5173",
     "extract": "node tools/extract-inline-babel.mjs",
     "build": "node tools/build.mjs"
   },
@@ -12,6 +14,7 @@
     "@supabase/supabase-js": "^2.43.2"
   },
   "devDependencies": {
+    "live-server": "^1.2.2",
     "tailwindcss": "^3.4.17"
   }
 }
