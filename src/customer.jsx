@@ -61,6 +61,35 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         return value && !value.startsWith(META_SPEC_PREFIX);
       });
 
+    const buildVariantOptionSet = (variants) => {
+      const set = new Set();
+      if (!variants || typeof variants !== 'object') return set;
+      Object.values(variants).forEach((raw) => {
+        if (!Array.isArray(raw)) return;
+        raw.forEach((value) => {
+          const normalized = String(value || '').trim().toLowerCase();
+          if (normalized) set.add(normalized);
+        });
+      });
+      return set;
+    };
+
+    const filterSpecsForDisplay = (specs, variants) => {
+      const optionSet = buildVariantOptionSet(variants);
+      return stripMetaSpecs(specs).filter((s) => !optionSet.has(String(s || '').trim().toLowerCase()));
+    };
+
+    const splitLabeledSpec = (spec) => {
+      const value = String(spec || '').trim();
+      const idx = value.indexOf(':');
+      if (idx <= 0) return null;
+      const label = value.slice(0, idx).trim();
+      const detail = value.slice(idx + 1).trim();
+      if (!label || !detail) return null;
+      if (label.length > 40 || detail.length > 120) return null;
+      return { label, detail };
+    };
+
     const extractFamilyFromProduct = (product) => {
       const specs = Array.isArray(product?.specs) ? product.specs : [];
       const match = specs.find((s) => typeof s === 'string' && s.startsWith(META_FAMILY_PREFIX));
@@ -1294,14 +1323,28 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     function ProductCard({ product, onOpen }){
       const [src, setSrc] = useState(getPrimaryImage(product));
       useEffect(()=>{ setSrc(getPrimaryImage(product)); },[product.image, product.images, product.name]);
-      const familyLabel = getProductFamily(product);
-      const categoryLabel = product.category && product.category !== 'All' ? String(product.category) : '';
-      const visibleSpecs = stripMetaSpecs(product.specs);
-      const specsPreview = visibleSpecs.slice(0, 6);
-      const extraSpecCount = Math.max(visibleSpecs.length - specsPreview.length, 0);
       const variantDims = Object.entries(product.variants || {})
         .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
         .map(([label]) => label);
+      const variantSummary = variantDims.map((dim) => {
+        const opts = Array.isArray(product?.variants?.[dim]) ? product.variants[dim] : [];
+        if (!opts.length) return null;
+        const preview = opts.slice(0, 3).join(', ');
+        const suffix = opts.length > 3 ? ` +${opts.length - 3}` : '';
+        return `${dim}: ${preview}${suffix}`;
+      }).filter(Boolean);
+      const filteredSpecs = filterSpecsForDisplay(product.specs, product.variants);
+      const specPairs = [];
+      const specTags = [];
+      filteredSpecs.forEach((spec) => {
+        const pair = splitLabeledSpec(spec);
+        if (pair) specPairs.push(pair);
+        else specTags.push(spec);
+      });
+      const pairsPreview = specPairs.slice(0, 4);
+      const tagsPreview = specTags.slice(0, 4);
+      const extraPairCount = Math.max(specPairs.length - pairsPreview.length, 0);
+      const extraTagCount = Math.max(specTags.length - tagsPreview.length, 0);
       const hasInventoryLimits = product.inventory && typeof product.inventory === 'object' && Object.keys(product.inventory).length > 0;
       return React.createElement('article', { className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition duration-200 hover:-translate-y-0.5 hover:shadow-soft-xl' },
         React.createElement('div', { className: 'aspect-square w-full overflow-hidden bg-slate-100' },
@@ -1310,29 +1353,41 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         React.createElement('div', { className: 'flex flex-1 flex-col gap-4 p-5' },
           React.createElement('header', null,
             React.createElement('div', { className: 'flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500' },
-              familyLabel && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[rgba(37,99,235,0.18)] bg-[rgba(37,99,235,0.08)] px-2.5 py-0.5 text-brand' }, familyLabel),
-              categoryLabel && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5' }, categoryLabel),
               hasInventoryLimits && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-amber-200 bg-amber-50/80 px-2.5 py-0.5 text-amber-700' }, 'Limited stock')
             ),
-            React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
+            React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+              React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
+              React.createElement('span', { className: 'text-base font-semibold text-slate-900 whitespace-nowrap' }, fmt(product.price))
+            ),
             product.description && React.createElement('p', {
               className: 'mt-2 text-sm text-slate-600',
               style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
             }, product.description),
             React.createElement('p', { className: 'mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
           ),
-          React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
-            specsPreview.map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)),
-            extraSpecCount > 0 && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/60 px-2.5 py-0.5 font-medium text-slate-500' }, `+${extraSpecCount} more`)
+          pairsPreview.length > 0 && React.createElement('dl', { className: 'grid grid-cols-1 gap-2 text-sm' },
+            pairsPreview.map(({ label, detail }) =>
+              React.createElement('div', { key: `${label}:${detail}`, className: 'flex items-baseline justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/60 px-3 py-2' },
+                React.createElement('dt', { className: 'text-xs font-semibold uppercase tracking-[0.16em] text-slate-500' }, label),
+                React.createElement('dd', { className: 'text-sm font-semibold text-slate-900' }, detail)
+              )
+            ),
+            extraPairCount > 0 && React.createElement('div', { className: 'text-xs text-slate-500' }, `+${extraPairCount} more details`)
           ),
-          variantDims.length > 0 && React.createElement('p', { className: 'text-xs text-slate-500' },
-            'Customer choices: ',
-            React.createElement('span', { className: 'font-medium text-slate-700' }, variantDims.join(', '))
+          tagsPreview.length > 0 && React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
+            tagsPreview.map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)),
+            extraTagCount > 0 && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/60 px-2.5 py-0.5 font-medium text-slate-500' }, `+${extraTagCount} more`)
           ),
-          React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
-            React.createElement('span', { className: 'text-sm font-semibold text-slate-900' }, fmt(product.price))
+          variantSummary.length > 0 && React.createElement('div', { className: 'rounded-2xl border border-[var(--surface-border)] bg-white/60 px-3 py-2 text-xs text-slate-600' },
+            React.createElement('div', { className: 'text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500' }, 'Options to choose'),
+            React.createElement('div', { className: 'mt-1 space-y-1' },
+              variantSummary.slice(0, 2).map((line) =>
+                React.createElement('p', { key: line, className: 'font-medium text-slate-700' }, line)
+              ),
+              variantSummary.length > 2 && React.createElement('p', { className: 'text-slate-500' }, `+${variantSummary.length - 2} more option groups`)
+            )
           ),
-          React.createElement('div', null,
+          React.createElement('div', { className: 'mt-auto' },
             React.createElement('button', {
               type: 'button',
               onClick: () => onOpen(product),
@@ -1381,6 +1436,17 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const dims = Object.entries(v)
         .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
         .map(([label]) => label);
+      const displaySpecs = useMemo(() => {
+        const filtered = filterSpecsForDisplay(product.specs, product.variants);
+        const pairs = [];
+        const tags = [];
+        filtered.forEach((spec) => {
+          const pair = splitLabeledSpec(spec);
+          if (pair) pairs.push(pair);
+          else tags.push(spec);
+        });
+        return { pairs, tags };
+      }, [product.specs, product.variants]);
 
       // selected options per dimension (default = all)
       const [active, setActive] = useState({});
@@ -1568,6 +1634,24 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                   React.createElement('img', { src: images[0], onError: (e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }, alt: `${product.name} – photo`, className: 'h-full w-full object-cover' })
                 ),
                 product.description && React.createElement('p', { className: 'text-sm text-slate-600' }, product.description),
+                (displaySpecs.pairs.length > 0 || displaySpecs.tags.length > 0) && React.createElement('section', {
+                  className: 'rounded-2xl border border-[var(--surface-border)] bg-white/80 p-4 text-sm shadow-sm backdrop-blur'
+                },
+                  React.createElement('h4', { className: 'text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Product information'),
+                  displaySpecs.pairs.length > 0 && React.createElement('dl', { className: 'mt-3 grid grid-cols-1 gap-2' },
+                    displaySpecs.pairs.map(({ label, detail }) =>
+                      React.createElement('div', { key: `${label}:${detail}`, className: 'flex items-baseline justify-between gap-3' },
+                        React.createElement('dt', { className: 'text-xs font-semibold uppercase tracking-[0.16em] text-slate-500' }, label),
+                        React.createElement('dd', { className: 'text-sm font-semibold text-slate-900' }, detail)
+                      )
+                    )
+                  ),
+                  displaySpecs.tags.length > 0 && React.createElement('div', { className: 'mt-3 flex flex-wrap gap-1.5 text-[11px]' },
+                    displaySpecs.tags.map((s) =>
+                      React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)
+                    )
+                  )
+                ),
                 dims.map(dim => {
                   const opts = v[dim] || [];
                   const current = active[dim] || [];

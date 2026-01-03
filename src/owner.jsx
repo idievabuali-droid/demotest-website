@@ -3553,27 +3553,30 @@
           });
         }
 
-        const baseSpecs = ((cfg.specs && cfg.specs(form)) || []).filter(Boolean);
         const extraSpecs = [];
         (categoryGroups.info || []).forEach((g) => {
           if (!g) return;
           const valueKey = getGroupValueKey(g);
+          const label = String(g.label || g.key || g.id || '').trim();
           if (g.fieldType === 'checkbox') {
-            if (form[valueKey]) extraSpecs.push(g.label);
+            if (form[valueKey]) extraSpecs.push(label || g.label);
             return;
           }
           if (groupIsMulti(g)) {
-            const list = Array.isArray(form[valueKey]) ? form[valueKey].map((v) => String(v).trim()).filter(Boolean) : [];
-            list.forEach((v) => extraSpecs.push(v));
+            const list = Array.isArray(form[valueKey])
+              ? form[valueKey].map((v) => String(v).trim()).filter(Boolean)
+              : [];
+            if (!list.length) return;
+            extraSpecs.push(label ? `${label}: ${list.join(', ')}` : list.join(', '));
             return;
           }
           const v = String(form[valueKey] || '').trim();
-          if (v) extraSpecs.push(v);
+          if (v) extraSpecs.push(label ? `${label}: ${v}` : v);
         });
 
         const familyName = String(family?.name || '').trim();
         const metaSpecs = familyName ? [`${META_FAMILY_PREFIX}${familyName}`] : [];
-        const specs = [...metaSpecs, ...Array.from(new Set([...baseSpecs, ...extraSpecs])).slice(0, 6)];
+        const specs = [...metaSpecs, ...Array.from(new Set(extraSpecs)).filter(Boolean)];
         const uniqueImages = Array.from(new Set((imagesData || []).filter(Boolean)));
         const product = {
           id: `owner-${Date.now()}`,
