@@ -2754,6 +2754,11 @@
       // Dynamic form state
       const [form, setForm] = useState({});
 
+      // Optional stock limits (saved into product.inventory)
+      const [inventoryEnabled, setInventoryEnabled] = useState(false);
+      const [inventoryDefault, setInventoryDefault] = useState('');
+      const [inventoryDraft, setInventoryDraft] = useState({});
+
       // Helpers
       const modeIsMulti = (mode) => String(mode || '').toLowerCase().includes('multi');
       const groupIsMulti = (group) => modeIsMulti(group?.mode);
@@ -3453,11 +3458,7 @@
         return Array.isArray(group.options) ? group.options : [];
       };
 
-      // Build product
-      const buildProduct = () => {
-        const cfg = SCHEMA[category] || { must: [], also: [], optional: [], name: null, specs: null };
-        const autoName = (cfg.name && cfg.name(form)) || `${category} item`;
-        const finalName = name.trim() || autoName;
+      const customerVariants = useMemo(() => {
         const variantsObj = {};
         (categoryGroups.customer || []).forEach((g) => {
           if (!g) return;
@@ -3465,13 +3466,92 @@
           const valueKey = getGroupValueKey(g);
           const raw = form[valueKey];
           if (groupIsMulti(g)) {
-            const list = Array.isArray(raw) ? raw.map((v) => String(v).trim()).filter(Boolean) : [];
-            if (list.length) variantsObj[key] = Array.from(new Set(list));
+            const list = Array.isArray(raw) ? raw : (raw == null ? [] : [raw]);
+            const cleaned = list.map((v) => String(v).trim()).filter(Boolean);
+            if (cleaned.length) variantsObj[key] = Array.from(new Set(cleaned));
             return;
           }
-          const v = String(raw || '').trim();
+          const single = Array.isArray(raw) ? raw[0] : raw;
+          const v = String(single || '').trim();
           if (v) variantsObj[key] = [v];
         });
+        return variantsObj;
+      }, [categoryGroups, form]);
+
+      const stockCombos = useMemo(() => {
+        const combos = computeVariantCombos(customerVariants);
+        return combos.slice().sort((a, b) => a.key.localeCompare(b.key));
+      }, [customerVariants]);
+
+      const stockComboKeys = useMemo(() => stockCombos.map((c) => c.key), [stockCombos]);
+
+      useEffect(() => {
+        if (!inventoryEnabled) return;
+        setInventoryDraft((prev) => {
+          const next = {};
+          stockComboKeys.forEach((key) => {
+            next[key] = Object.prototype.hasOwnProperty.call(prev, key) ? prev[key] : '';
+          });
+          const prevKeys = Object.keys(prev);
+          if (
+            prevKeys.length === stockComboKeys.length &&
+            prevKeys.every((key) => Object.prototype.hasOwnProperty.call(next, key) && next[key] === prev[key])
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }, [inventoryEnabled, stockComboKeys]);
+
+      const applyInventoryDefaultToAll = () => {
+        const numeric = Number(inventoryDefault);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(Math.floor(numeric));
+        setInventoryDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = value;
+          });
+          return next;
+        });
+      };
+
+      const clearInventoryAll = () => {
+        setInventoryDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = '';
+          });
+          return next;
+        });
+        setInventoryDefault('');
+      };
+
+      const formatStockComboLabel = (selection) => {
+        const entries = Object.entries(selection || {})
+          .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (!entries.length) return 'Base product';
+        return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
+      };
+
+      // Build product
+      const buildProduct = () => {
+        const cfg = SCHEMA[category] || { must: [], also: [], optional: [], name: null, specs: null };
+        const autoName = (cfg.name && cfg.name(form)) || `${category} item`;
+        const finalName = name.trim() || autoName;
+        const variantsObj = customerVariants;
+
+        const inventoryObj = {};
+        if (inventoryEnabled) {
+          Object.entries(inventoryDraft || {}).forEach(([key, raw]) => {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            inventoryObj[(key && key.trim()) || INVENTORY_BASE_KEY] = Math.floor(numeric);
+          });
+        }
 
         const baseSpecs = ((cfg.specs && cfg.specs(form)) || []).filter(Boolean);
         const extraSpecs = [];
@@ -3505,7 +3585,8 @@
           image: uniqueImages[0] || undefined,
           images: uniqueImages.length ? uniqueImages : undefined,
           specs,
-          variants: variantsObj
+          variants: variantsObj,
+          inventory: inventoryEnabled ? inventoryObj : undefined
         };
         return normalizeProductRow(product);
       };
@@ -3539,6 +3620,16 @@
           }
         }
 
+        if (inventoryEnabled) {
+          const invalid = Object.entries(inventoryDraft || {}).find(([_, raw]) => {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return false;
+            const numeric = Number(trimmed);
+            return !Number.isFinite(numeric) || numeric < 0;
+          });
+          if (invalid) errors.push('Stock quantities must be 0 or greater (or leave blank for unlimited).');
+        }
+
         return errors;
       };
 
@@ -3568,6 +3659,9 @@
           setDescription('');
           setImagesData([]);
           setForm({});
+          setInventoryEnabled(false);
+          setInventoryDefault('');
+          setInventoryDraft({});
         } catch (error) {
           console.error('Failed to add product:', error);
           setSubmitStatus({ type: 'error', message: 'Could not save product. Check your connection and try again.' });
@@ -3698,6 +3792,59 @@
                   onRemove: () => removeGroup('customer', g),
                 });
               })
+            )
+          ),
+
+          React.createElement('div', { className: 'space-y-3' },
+            React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Stock limits (optional)'),
+              React.createElement('label', { className: 'inline-flex items-center gap-2 rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur' },
+                React.createElement('input', {
+                  type: 'checkbox',
+                  checked: inventoryEnabled,
+                  onChange: (e) => setInventoryEnabled(e.target.checked),
+                  className: 'h-4 w-4 rounded border-[var(--surface-border)] text-brand focus:ring-brand'
+                }),
+                'Limit stock'
+              )
+            ),
+            React.createElement('p', { className: 'text-sm text-slate-600' }, 'Optional. Leave blank to keep a variant unlimited.'),
+            inventoryEnabled && React.createElement('div', { className: 'space-y-3 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
+              React.createElement('div', { className: 'flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between' },
+                React.createElement('label', { className: 'block flex-1 text-sm text-slate-600' },
+                  React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Default quantity'),
+                  React.createElement('input', {
+                    type: 'number',
+                    min: 0,
+                    step: '1',
+                    value: inventoryDefault,
+                    onChange: (e) => setInventoryDefault(e.target.value),
+                    placeholder: 'e.g. 10',
+                    className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                  })
+                ),
+                React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                  React.createElement('button', { type: 'button', onClick: applyInventoryDefaultToAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Apply to all'),
+                  React.createElement('button', { type: 'button', onClick: clearInventoryAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Clear all')
+                )
+              ),
+              React.createElement('div', { className: 'max-h-72 space-y-2 overflow-y-auto pr-1' },
+                stockCombos.map(({ key, selection }) =>
+                  React.createElement('label', { key, className: 'flex items-center justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner' },
+                    React.createElement('span', { className: 'flex-1 text-xs font-semibold text-slate-700' }, formatStockComboLabel(selection)),
+                    React.createElement('input', {
+                      type: 'number',
+                      min: 0,
+                      step: '1',
+                      inputMode: 'numeric',
+                      value: inventoryDraft[key] ?? '',
+                      onChange: (e) => setInventoryDraft((prev) => ({ ...prev, [key]: e.target.value })),
+                      placeholder: 'Unlimited',
+                      className: 'w-32 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3 py-2 text-right text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                    })
+                  )
+                )
+              )
             )
           ),
 
