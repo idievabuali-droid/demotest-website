@@ -1294,17 +1294,40 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     function ProductCard({ product, onOpen }){
       const [src, setSrc] = useState(getPrimaryImage(product));
       useEffect(()=>{ setSrc(getPrimaryImage(product)); },[product.image, product.images, product.name]);
+      const familyLabel = getProductFamily(product);
+      const categoryLabel = product.category && product.category !== 'All' ? String(product.category) : '';
+      const visibleSpecs = stripMetaSpecs(product.specs);
+      const specsPreview = visibleSpecs.slice(0, 6);
+      const extraSpecCount = Math.max(visibleSpecs.length - specsPreview.length, 0);
+      const variantDims = Object.entries(product.variants || {})
+        .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
+        .map(([label]) => label);
+      const hasInventoryLimits = product.inventory && typeof product.inventory === 'object' && Object.keys(product.inventory).length > 0;
       return React.createElement('article', { className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition duration-200 hover:-translate-y-0.5 hover:shadow-soft-xl' },
         React.createElement('div', { className: 'aspect-square w-full overflow-hidden bg-slate-100' },
           React.createElement('img', { src: src, onError: ()=> setSrc(buildPlaceholderDataURI(product.name)), alt: product.name, className: 'h-full w-full object-cover', loading: 'lazy' })
         ),
         React.createElement('div', { className: 'flex flex-1 flex-col gap-4 p-5' },
           React.createElement('header', null,
+            React.createElement('div', { className: 'flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500' },
+              familyLabel && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[rgba(37,99,235,0.18)] bg-[rgba(37,99,235,0.08)] px-2.5 py-0.5 text-brand' }, familyLabel),
+              categoryLabel && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5' }, categoryLabel),
+              hasInventoryLimits && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-amber-200 bg-amber-50/80 px-2.5 py-0.5 text-amber-700' }, 'Limited stock')
+            ),
             React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
-            React.createElement('p', { className: 'mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
+            product.description && React.createElement('p', {
+              className: 'mt-2 text-sm text-slate-600',
+              style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
+            }, product.description),
+            React.createElement('p', { className: 'mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
           ),
           React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
-            stripMetaSpecs(product.specs).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s))
+            specsPreview.map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)),
+            extraSpecCount > 0 && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/60 px-2.5 py-0.5 font-medium text-slate-500' }, `+${extraSpecCount} more`)
+          ),
+          variantDims.length > 0 && React.createElement('p', { className: 'text-xs text-slate-500' },
+            'Customer choices: ',
+            React.createElement('span', { className: 'font-medium text-slate-700' }, variantDims.join(', '))
           ),
           React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
             React.createElement('span', { className: 'text-sm font-semibold text-slate-900' }, fmt(product.price))
