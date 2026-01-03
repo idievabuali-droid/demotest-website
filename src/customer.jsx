@@ -51,6 +51,37 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     const DEFAULT_OWNER_MODE = OWNER_PORTAL_ONLY || document.body.dataset.defaultOwner === 'true';
     const OWNER_API_ENDPOINT = '/.netlify/functions/catalogue';
     const INVENTORY_BASE_KEY = '__base__';
+    const CONFIG_PRODUCT_ID = '__catalog_config__';
+    const META_SPEC_PREFIX = '__';
+    const META_FAMILY_PREFIX = '__family:';
+
+    const stripMetaSpecs = (specs) =>
+      (Array.isArray(specs) ? specs : []).filter((s) => {
+        const value = String(s || '');
+        return value && !value.startsWith(META_SPEC_PREFIX);
+      });
+
+    const extractFamilyFromProduct = (product) => {
+      const specs = Array.isArray(product?.specs) ? product.specs : [];
+      const match = specs.find((s) => typeof s === 'string' && s.startsWith(META_FAMILY_PREFIX));
+      return match ? String(match).slice(META_FAMILY_PREFIX.length).trim() : '';
+    };
+
+    const inferFamilyFromProduct = (product) => {
+      const variants = product?.variants && typeof product.variants === 'object' ? product.variants : {};
+      const modelOptions = Array.isArray(variants.Model) ? variants.Model : [];
+      const joined = modelOptions.map((m) => String(m || '').toLowerCase());
+      if (joined.some((m) => m.startsWith('iphone'))) return 'iPhone';
+      if (joined.some((m) => m.startsWith('galaxy a'))) return 'Samsung A';
+      if (joined.some((m) => m.startsWith('galaxy s'))) return 'Samsung S';
+      return 'Accessories';
+    };
+
+    const getProductFamily = (product) => {
+      const explicit = extractFamilyFromProduct(product);
+      if (explicit) return explicit;
+      return inferFamilyFromProduct(product);
+    };
 
     const buildVariantKey = (selection = {}) => {
       const entries = Object.entries(selection || {}).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '');
@@ -375,6 +406,46 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       "Samsung S": SAMSUNG_S_MODELS,
       "Samsung A": SAMSUNG_A_MODELS
     };
+
+    const buildDefaultCatalogConfig = () => ({
+      version: 1,
+      categories: CATEGORIES.filter((c) => c !== 'All'),
+      families: [
+        { id: 'iphone', name: 'iPhone', models: [...IPHONE_MODELS] },
+        { id: 'samsung_s', name: 'Samsung S', models: [...SAMSUNG_S_MODELS] },
+        { id: 'samsung_a', name: 'Samsung A', models: [...SAMSUNG_A_MODELS] },
+        { id: 'accessories', name: 'Accessories', models: [] },
+      ],
+      groupsByCategory: {},
+      groupOverridesByCategoryFamily: {},
+      groupHiddenByCategoryFamily: {},
+    });
+
+    const mergeCatalogConfig = (raw) => {
+      const base = buildDefaultCatalogConfig();
+      if (!raw || typeof raw !== 'object') return base;
+      const next = { ...base, ...raw };
+      next.categories = Array.isArray(next.categories) ? next.categories.filter(Boolean) : base.categories;
+      next.families = Array.isArray(next.families) ? next.families.filter(Boolean) : base.families;
+      next.groupsByCategory = next.groupsByCategory && typeof next.groupsByCategory === 'object' ? next.groupsByCategory : {};
+      next.groupOverridesByCategoryFamily = next.groupOverridesByCategoryFamily && typeof next.groupOverridesByCategoryFamily === 'object' ? next.groupOverridesByCategoryFamily : {};
+      next.groupHiddenByCategoryFamily = next.groupHiddenByCategoryFamily && typeof next.groupHiddenByCategoryFamily === 'object' ? next.groupHiddenByCategoryFamily : {};
+      return next;
+    };
+
+    function useCatalogConfig(ownerProducts) {
+      const [catalogConfig, setCatalogConfig] = useState(() => buildDefaultCatalogConfig());
+
+      useEffect(() => {
+        const configRow = (ownerProducts || []).find((p) => p && p.id === CONFIG_PRODUCT_ID);
+        const raw = configRow?.variants?.__config;
+        if (raw && typeof raw === 'object') {
+          setCatalogConfig(mergeCatalogConfig(raw));
+        }
+      }, [ownerProducts]);
+
+      return catalogConfig;
+    }
 
     // Common lists
     const QUALITY_GRADE = ["Original","OEM","AAA","Aftermarket","Refurb"];
@@ -942,9 +1013,11 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       return React.createElement('a', { href: '#main', className: 'sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 rounded-full border border-[var(--surface-border)] bg-white/90 px-3 py-2 text-sm font-semibold text-brand shadow-sm backdrop-blur' }, 'Skip to content');
     }
 
-  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus, allowOwnerToggle }){
+  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus, allowOwnerToggle, families, family, setFamily }){
       const [scrolled, setScrolled] = useState(false);
       const hdrRef = useRef(null);
+      const familyScrollRef = useRef(null);
+      const [familyFade, setFamilyFade] = useState({ left: false, right: false });
       useEffect(()=>{ const onScroll=()=> setScrolled(window.scrollY>4); onScroll(); window.addEventListener('scroll', onScroll, { passive:true }); return ()=> window.removeEventListener('scroll', onScroll); },[]);
       // measure header height (incl. mobile search row) -> CSS var --header-offset
       useEffect(() => {
@@ -955,12 +1028,39 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         setVar();
         window.addEventListener('resize', setVar, { passive:true });
         return () => window.removeEventListener('resize', setVar);
-      }, [ownerMode, search]);
+      }, [ownerMode, search, families]);
+
+      useEffect(() => {
+        if (ownerMode) return;
+        const updateFade = () => {
+          const el = familyScrollRef.current;
+          if (!el) return;
+          const { scrollLeft, scrollWidth, clientWidth } = el;
+          const left = scrollLeft > 0;
+          const right = scrollLeft + clientWidth < scrollWidth - 1;
+          setFamilyFade(prev => (prev.left === left && prev.right === right ? prev : { left, right }));
+        };
+        updateFade();
+        const el = familyScrollRef.current;
+        if (!el) return;
+        el.addEventListener('scroll', updateFade, { passive: true });
+        window.addEventListener('resize', updateFade);
+        return () => {
+          el.removeEventListener('scroll', updateFade);
+          window.removeEventListener('resize', updateFade);
+        };
+      }, [ownerMode, families]);
       const statusSpec = connectionStatus === 'connected'
         ? { wrapper: 'border border-emerald-200 bg-emerald-50/80 text-emerald-600', dot: 'bg-emerald-500', label: 'Online' }
         : connectionStatus === 'error'
         ? { wrapper: 'border border-rose-200 bg-rose-50/80 text-rose-600', dot: 'bg-rose-500', label: 'Offline' }
         : { wrapper: 'border border-amber-200 bg-amber-50/80 text-amber-600', dot: 'bg-amber-400 animate-pulse', label: 'Connecting' };
+
+      const familyWrapperClasses = cx(
+        'chip-scroll -mx-4',
+        familyFade.left && 'show-left',
+        familyFade.right && 'show-right'
+      );
 
       return React.createElement('header', {
         ref: hdrRef,
@@ -1030,6 +1130,25 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                 className: 'w-full rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm font-medium text-slate-700 shadow-inner backdrop-blur focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent placeholder:text-slate-400'
               }),
               React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400' })
+            )
+          ),
+          !ownerMode && Array.isArray(families) && families.length > 0 && React.createElement('div', { className: 'mt-2 pb-2', 'aria-label': 'Families' },
+            React.createElement('div', { className: familyWrapperClasses },
+              React.createElement('div', { ref: familyScrollRef, className: 'chip-scroll-inner overflow-x-auto px-4' },
+                React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
+                  families.map((fam)=> React.createElement('button', {
+                    key: fam,
+                    onClick: ()=> setFamily(fam),
+                    'aria-pressed': family === fam,
+                    className: cx(
+                      'inline-flex items-center whitespace-nowrap rounded-full border px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                      family === fam
+                        ? 'border-transparent bg-brand text-white shadow-sm'
+                        : 'border-[var(--surface-border)] bg-white/70 text-slate-600 hover:text-slate-900 hover:bg-white/90'
+                    )
+                  }, fam))
+                )
+              )
             )
           )
         )
@@ -1107,7 +1226,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       );
     }
 
-    function CategoryChips({ active, setActive }){
+    function CategoryChips({ categories, active, setActive }){
       const containerRef = useRef(null);
       const [fade, setFade] = useState({ left: false, right: false });
 
@@ -1144,7 +1263,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             React.createElement('div', { className: wrapperClasses },
               React.createElement('div', { ref: containerRef, className: 'chip-scroll-inner overflow-x-auto px-4' },
                 React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
-                  CATEGORIES.map((cat)=> React.createElement('button', {
+                  (categories || []).map((cat)=> React.createElement('button', {
                     key: cat,
                     onClick: ()=> setActive(cat),
                     'aria-pressed': active===cat,
@@ -1185,7 +1304,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             React.createElement('p', { className: 'mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
           ),
           React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
-            (product.specs||[]).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s))
+            stripMetaSpecs(product.specs).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s))
           ),
           React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
             React.createElement('span', { className: 'text-sm font-semibold text-slate-900' }, fmt(product.price))
@@ -1468,52 +1587,54 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                   combos.length === 0 ? (
                     React.createElement('p', { className: 'text-xs text-slate-500' }, 'Select at least one option.')
                   ) : (
-                    combos.map(({ key, sel }) => {
-                      const availableTotal = inventoryMap[key] !== undefined
-                        ? inventoryMap[key]
-                        : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
-                      const used = existingQtyByKey[key] || 0;
-                      const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
-                      const isOut = typeof remaining === 'number' && remaining <= 0;
-                      const limitWarning = limitWarnings[key];
-                      return React.createElement('div', {
-                        key,
-                        className: cx(
-                          'rounded-2xl border px-3 py-3 text-sm shadow-sm backdrop-blur sm:flex sm:items-center sm:justify-between',
-                          isOut ? 'border-rose-200 bg-rose-50/80 text-rose-700' : 'border-[var(--surface-border)] bg-white/85 text-slate-700'
-                        )
-                      },
-                        React.createElement('div', { className: 'space-y-1 text-sm' },
-                          Object.entries(sel).map(([k, val], i) => (
-                            React.createElement('span', { key: `${k}-${val}` },
-                              i>0 ? ' · ' : '',
-                              k === 'Color'
-                                ? React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: val }), val)
-                                : React.createElement('span', { className: 'font-medium text-slate-900' }, val)
-                            )
-                          )),
-                          Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium text-slate-900' }, 'Quantity'),
-                          typeof availableTotal === 'number'
-                            ? React.createElement('p', { className: 'text-xs text-slate-500' },
-                                `Remaining: ${Math.max(availableTotal - used, 0)}${used > 0 ? ` (of ${availableTotal})` : ''}`)
-                            : React.createElement('p', { className: 'text-xs text-slate-500' }, 'No stock limit')
-                        ),
-                        React.createElement('div', { className: 'mt-2 sm:mt-0' },
-                          React.createElement(NumberStepper, {
-                            value: Number(qtyMap[key] || 0),
-                            onChange: (v) => setQty(key, v),
-                            min: 0,
-                            max: typeof remaining === 'number' ? remaining : undefined,
-                            onLimit: (limit) => {
-                              if (typeof limit === 'number' && Number.isFinite(limit)) {
-                                setLimitWarnings(prev => ({ ...prev, [key]: limit }));
+                    React.createElement('div', { className: 'max-h-80 overflow-y-auto space-y-3 pr-1' },
+                      combos.map(({ key, sel }) => {
+                        const availableTotal = inventoryMap[key] !== undefined
+                          ? inventoryMap[key]
+                          : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
+                        const used = existingQtyByKey[key] || 0;
+                        const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
+                        const isOut = typeof remaining === 'number' && remaining <= 0;
+                        const limitWarning = limitWarnings[key];
+                        return React.createElement('div', {
+                          key,
+                          className: cx(
+                            'rounded-2xl border px-3 py-3 text-sm shadow-sm backdrop-blur sm:flex sm:items-center sm:justify-between',
+                            isOut ? 'border-rose-200 bg-rose-50/80 text-rose-700' : 'border-[var(--surface-border)] bg-white/85 text-slate-700'
+                          )
+                        },
+                          React.createElement('div', { className: 'space-y-1 text-sm' },
+                            Object.entries(sel).map(([k, val], i) => (
+                              React.createElement('span', { key: `${k}-${val}` },
+                                i>0 ? ' · ' : '',
+                                k === 'Color'
+                                  ? React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: val }), val)
+                                  : React.createElement('span', { className: 'font-medium text-slate-900' }, val)
+                              )
+                            )),
+                            Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium text-slate-900' }, 'Quantity'),
+                            typeof availableTotal === 'number'
+                              ? React.createElement('p', { className: 'text-xs text-slate-500' },
+                                  `Remaining: ${Math.max(availableTotal - used, 0)}${used > 0 ? ` (of ${availableTotal})` : ''}`)
+                              : React.createElement('p', { className: 'text-xs text-slate-500' }, 'No stock limit')
+                          ),
+                          React.createElement('div', { className: 'mt-2 sm:mt-0' },
+                            React.createElement(NumberStepper, {
+                              value: Number(qtyMap[key] || 0),
+                              onChange: (v) => setQty(key, v),
+                              min: 0,
+                              max: typeof remaining === 'number' ? remaining : undefined,
+                              onLimit: (limit) => {
+                                if (typeof limit === 'number' && Number.isFinite(limit)) {
+                                  setLimitWarnings(prev => ({ ...prev, [key]: limit }));
+                                }
                               }
-                            }
-                          })
-                        ),
-                        limitWarning !== undefined ? React.createElement('p', { className: 'mt-2 text-xs font-medium text-rose-600 sm:ml-3 sm:mt-0 sm:text-right' }, `Only ${limitWarning} available for this selection.`) : null
-                      );
-                    })
+                            })
+                          ),
+                          limitWarning !== undefined ? React.createElement('p', { className: 'mt-2 text-xs font-medium text-rose-600 sm:ml-3 sm:mt-0 sm:text-right' }, `Only ${limitWarning} available for this selection.`) : null
+                        );
+                      })
+                    )
                   )
                 )
               ),
@@ -2667,6 +2788,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const lastCatalogScrollRef = React.useRef(0);
       const [search, setSearch] = useState("");
       const [category, setCategory] = useState("All");
+      const [family, setFamily] = useState("All");
       const [selectedProduct, setSelectedProduct] = useState(null);
       const [cartOpen, setCartOpen] = useState(false);
       const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
@@ -2686,6 +2808,28 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       }, []);
       const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
+      const catalogConfig = useCatalogConfig(ownerProducts);
+
+      const families = useMemo(() => {
+        const fromConfig = (catalogConfig?.families || [])
+          .map((f) => (f && typeof f === 'object' ? f.name : null))
+          .filter(Boolean);
+        const fallback = ['iPhone', 'Samsung S', 'Samsung A', 'Accessories'];
+        const list = fromConfig.length ? fromConfig : fallback;
+        const uniq = [];
+        const seen = new Set();
+        list.forEach((name) => {
+          const trimmed = String(name || '').trim();
+          if (!trimmed || seen.has(trimmed)) return;
+          seen.add(trimmed);
+          uniq.push(trimmed);
+        });
+        return ['All', ...uniq];
+      }, [catalogConfig]);
+
+      useEffect(() => {
+        if (!families.includes(family)) setFamily('All');
+      }, [families, family]);
 
       const shouldLockScroll = Boolean(selectedProduct || cartOpen);
       useBodyScrollLock(shouldLockScroll, lastCatalogScrollRef);
@@ -2696,6 +2840,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         const newProducts = [];
         
         ownerProducts.forEach(op => {
+          if (!op || op.id === CONFIG_PRODUCT_ID) return;
           if (op.sourceId && map.has(op.sourceId)) {
             if (op.hidden) {
               map.delete(op.sourceId);
@@ -2717,12 +2862,49 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         // Return new products first, then existing products
         return [...newProducts, ...Array.from(map.values())];
       }, [ownerProducts]);
+
+      const categoryIndex = useMemo(() => {
+        const byFamily = new Map();
+        const all = new Set();
+        allProducts.forEach((p) => {
+          if (!p || p.id === CONFIG_PRODUCT_ID) return;
+          const cat = String(p.category || '').trim();
+          if (!cat || cat === 'All') return;
+          const fam = getProductFamily(p);
+          if (!byFamily.has(fam)) byFamily.set(fam, new Set());
+          byFamily.get(fam).add(cat);
+          all.add(cat);
+        });
+        return { byFamily, all };
+      }, [allProducts]);
+
+      const categories = useMemo(() => {
+        const fromConfig = Array.isArray(catalogConfig?.categories) ? catalogConfig.categories.filter(Boolean) : [];
+        const baseOrder = fromConfig.length ? fromConfig : CATEGORIES.filter((c) => c !== 'All');
+        const visibleSet = family === 'All'
+          ? categoryIndex.all
+          : (categoryIndex.byFamily.get(family) || new Set());
+        const ordered = baseOrder.filter((cat) => visibleSet.has(cat));
+        const extras = Array.from(visibleSet)
+          .filter((cat) => !baseOrder.includes(cat))
+          .sort((a, b) => a.localeCompare(b));
+        return ['All', ...ordered, ...extras];
+      }, [catalogConfig, family, categoryIndex]);
+
+      useEffect(() => {
+        if (!categories.includes(category)) setCategory('All');
+      }, [categories, category]);
+
+      useEffect(() => {
+        setCategory('All');
+      }, [family]);
       const filteredProducts = useMemo(() => {
         let filtered = allProducts;
+        if (family !== "All") filtered = filtered.filter(p => getProductFamily(p) === family);
         if (category !== "All") filtered = filtered.filter(p => p.category === category);
         if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()) || (p.description || '').toLowerCase().includes(search.toLowerCase()));
         return filtered;
-      }, [allProducts, category, search]);
+      }, [allProducts, family, category, search]);
       const productLookup = useMemo(() => {
         const map = new Map();
         allProducts.forEach((p) => {
@@ -2815,10 +2997,10 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         notice && React.createElement('div', { className: cx('fixed bottom-4 right-4 z-40 max-w-sm rounded-lg border px-4 py-3 text-sm shadow-lg backdrop-blur', notice.type === 'error' ? 'border-red-200 bg-red-50/90 text-red-700' : notice.type === 'warning' ? 'border-amber-200 bg-amber-50/90 text-amber-800' : 'border-emerald-200 bg-emerald-50/90 text-emerald-700') },
           React.createElement('div', { className: 'flex items-start gap-3' },
             React.createElement('span', { className: 'flex-1 leading-snug' }, notice.message),
-            React.createElement('button', { type: 'button', onClick: ()=> setNotice(null), className: 'text-xs font-medium uppercase tracking-wide text-slate-500 hover:text-slate-700' }, 'Dismiss')
+          React.createElement('button', { type: 'button', onClick: ()=> setNotice(null), className: 'text-xs font-medium uppercase tracking-wide text-slate-500 hover:text-slate-700' }, 'Dismiss')
           )
         ),
-  React.createElement(Header, { onOpenCart: ()=> { lastCatalogScrollRef.current = window.scrollY || 0; setCartOpen(true); }, search, setSearch, ownerMode, setOwnerMode: toggleOwnerMode, cartQty, connectionStatus, allowOwnerToggle: OWNER_TOGGLE_ENABLED }),
+  React.createElement(Header, { onOpenCart: ()=> { lastCatalogScrollRef.current = window.scrollY || 0; setCartOpen(true); }, search, setSearch, ownerMode, setOwnerMode: toggleOwnerMode, cartQty, connectionStatus, allowOwnerToggle: OWNER_TOGGLE_ENABLED, families, family, setFamily }),
         ownerMode ? (
           ownerManage ? (
             React.createElement(OwnerManager, { products: allProducts, onClose: ()=> setOwnerManage(false), onEdit: (p)=> { lastCatalogScrollRef.current = window.scrollY || 0; setSelectedProduct({ __edit: true, product: p }); }, onHide: (baseId)=> hideBase(baseId), onDelete: (id)=> deleteOwnerProduct(id), onSave: saveEdit })
@@ -2826,7 +3008,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             React.createElement(OwnerPage, { addProduct: addProduct, products: ownerProducts, removeProduct: (id)=> deleteOwnerProduct(id), onNotify: pushNotice })
           )
         ) : (
-          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
+          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { categories, active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
             products: filteredProducts, 
             onOpen: (p) => {
               lastCatalogScrollRef.current = window.scrollY || 0;
