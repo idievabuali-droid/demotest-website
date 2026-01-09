@@ -54,6 +54,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     const CONFIG_PRODUCT_ID = '__catalog_config__';
     const META_SPEC_PREFIX = '__';
     const META_FAMILY_PREFIX = '__family:';
+    const PRICE_OVERRIDE_VARIANTS_KEY = '__prices';
 
     const stripMetaSpecs = (specs) =>
       (Array.isArray(specs) ? specs : []).filter((s) => {
@@ -131,6 +132,39 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         }
       });
       return result;
+    };
+
+    const normalizePriceOverrides = (raw) => {
+      if (!raw || typeof raw !== 'object') return {};
+      const result = {};
+      Object.entries(raw).forEach(([key, value]) => {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric) && numeric >= 0) {
+          result[(key && key.trim()) || INVENTORY_BASE_KEY] = numeric;
+        }
+      });
+      return result;
+    };
+
+    const getProductPriceMap = (product) =>
+      normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+
+    const getUnitPriceForKey = (product, key) => {
+      const base = Number(product?.price) || 0;
+      const map = getProductPriceMap(product);
+      const normalizedKey = (key && String(key).trim()) || INVENTORY_BASE_KEY;
+      if (Object.prototype.hasOwnProperty.call(map, normalizedKey)) return map[normalizedKey];
+      return base;
+    };
+
+    const getProductPriceRange = (product) => {
+      const base = Number(product?.price) || 0;
+      const map = getProductPriceMap(product);
+      const values = Object.values(map);
+      if (!values.length) return { min: base, max: base, hasOverrides: false };
+      const min = Math.min(base, ...values);
+      const max = Math.max(base, ...values);
+      return { min, max, hasOverrides: min !== max };
     };
 
     // ---- Supabase Configuration ----
@@ -1346,6 +1380,10 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const extraPairCount = Math.max(specPairs.length - pairsPreview.length, 0);
       const extraTagCount = Math.max(specTags.length - tagsPreview.length, 0);
       const hasInventoryLimits = product.inventory && typeof product.inventory === 'object' && Object.keys(product.inventory).length > 0;
+      const priceRange = getProductPriceRange(product);
+      const priceLabel = priceRange.min === priceRange.max
+        ? fmt(priceRange.min)
+        : `${fmt(priceRange.min)}–${fmt(priceRange.max)}`;
       return React.createElement('article', { className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition duration-200 hover:-translate-y-0.5 hover:shadow-soft-xl' },
         React.createElement('div', { className: 'aspect-square w-full overflow-hidden bg-slate-100' },
           React.createElement('img', { src: src, onError: ()=> setSrc(buildPlaceholderDataURI(product.name)), alt: product.name, className: 'h-full w-full object-cover', loading: 'lazy' })
@@ -1357,7 +1395,10 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             ),
             React.createElement('div', { className: 'flex items-start justify-between gap-3' },
               React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
-              React.createElement('span', { className: 'text-base font-semibold text-slate-900 whitespace-nowrap' }, fmt(product.price))
+              React.createElement('div', { className: 'flex flex-col items-end gap-1' },
+                React.createElement('span', { className: 'text-base font-semibold text-slate-900 whitespace-nowrap' }, priceLabel),
+                priceRange.hasOverrides && React.createElement('span', { className: 'text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400' }, 'Price range')
+              )
             ),
             product.description && React.createElement('p', {
               className: 'mt-2 text-sm text-slate-600',
@@ -1410,6 +1451,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
 
       const cartItemsSafe = Array.isArray(cartItems) ? cartItems : [];
       const inventoryMap = useMemo(() => normalizeInventoryObject(product.inventory), [product.inventory]);
+      const priceMap = useMemo(() => getProductPriceMap(product), [product.variants]);
       const existingQtyByKey = useMemo(() => {
         const map = {};
         cartItemsSafe.forEach((item) => {
@@ -1529,6 +1571,9 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         combos.forEach(({ key, sel }) => {
           const requested = Number(qtyMap[key] || 0);
           if (!(requested > 0)) return;
+          const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+            ? priceMap[key]
+            : (Number(product.price) || 0);
           const availableTotal = inventoryMap[key] !== undefined
             ? inventoryMap[key]
             : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
@@ -1536,7 +1581,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
           const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
           const allowed = typeof remaining === 'number' ? Math.min(requested, remaining) : requested;
           if (allowed > 0) {
-            onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: allowed, variants: sel, inventoryKey: key });
+            onAdd({ id: product.id, name: product.name, sku: product.sku, price: unitPrice, qty: allowed, variants: sel, inventoryKey: key });
             addedAny = true;
             if (allowed < requested) trimmed = true;
           } else {
@@ -1552,6 +1597,9 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const totalSelected = useMemo(() => combos.reduce((sum, { key }) => {
         const requested = Number(qtyMap[key] || 0);
         if (!Number.isFinite(requested) || requested <= 0) return sum;
+        const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+          ? priceMap[key]
+          : (Number(product.price) || 0);
         const availableTotal = inventoryMap[key] !== undefined
           ? inventoryMap[key]
           : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
@@ -1559,8 +1607,8 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
         const allowed = typeof remaining === 'number' ? Math.min(requested, remaining) : requested;
         if (!(allowed > 0)) return sum;
-        return sum + allowed * product.price;
-      }, 0), [combos, qtyMap, product.price, inventoryMap, existingQtyByKey]);
+        return sum + allowed * unitPrice;
+      }, 0), [combos, qtyMap, product.price, priceMap, inventoryMap, existingQtyByKey]);
 
       const disabled = combos.every(({ key }) => {
         const requested = Number(qtyMap[key] || 0);
@@ -1696,6 +1744,10 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                   ) : (
                     React.createElement('div', { className: 'max-h-80 overflow-y-auto space-y-3 pr-1' },
                       combos.map(({ key, sel }) => {
+                        const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+                          ? priceMap[key]
+                          : (Number(product.price) || 0);
+                        const lineQty = Number(qtyMap[key] || 0);
                         const availableTotal = inventoryMap[key] !== undefined
                           ? inventoryMap[key]
                           : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
@@ -1720,6 +1772,14 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                               )
                             )),
                             Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium text-slate-900' }, 'Quantity'),
+                            React.createElement('p', { className: 'text-xs text-slate-500' },
+                              'Unit: ',
+                              React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(unitPrice)),
+                              lineQty > 0 ? React.createElement(React.Fragment, null,
+                                ' · Total: ',
+                                React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(unitPrice * lineQty))
+                              ) : null
+                            ),
                             typeof availableTotal === 'number'
                               ? React.createElement('p', { className: 'text-xs text-slate-500' },
                                   `Remaining: ${Math.max(availableTotal - used, 0)}${used > 0 ? ` (of ${availableTotal})` : ''}`)
@@ -1747,10 +1807,18 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
               ),
               React.createElement('aside', { className: 'glass-card rounded-3xl space-y-5 p-5' },
                 React.createElement('div', { className: 'space-y-2 text-sm' },
-                  React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
-                    React.createElement('span', null, 'Unit price'),
-                    React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(product.price))
-                  ),
+                  (() => {
+                    const base = Number(product.price) || 0;
+                    const values = Object.values(priceMap);
+                    const min = values.length ? Math.min(base, ...values) : base;
+                    const max = values.length ? Math.max(base, ...values) : base;
+                    const label = min === max ? fmt(min) : `${fmt(min)}–${fmt(max)}`;
+                    const title = values.length ? 'Price range' : 'Unit price';
+                    return React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
+                      React.createElement('span', null, title),
+                      React.createElement('span', { className: 'font-semibold text-slate-900' }, label)
+                    );
+                  })(),
                   React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
                     React.createElement('span', null, 'Selections'),
                     React.createElement('span', { className: 'font-medium text-slate-800' }, combos.length)

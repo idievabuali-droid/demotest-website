@@ -83,6 +83,7 @@
     const OWNER_API_ENDPOINT = '/.netlify/functions/catalogue';
     const OWNER_DEFAULT_CURRENCY = CURRENCY;
     const INVENTORY_BASE_KEY = '__base__';
+    const PRICE_OVERRIDE_VARIANTS_KEY = '__prices';
 
     const normalizeVariantLabel = (label, key) => {
       const fallback = (label || key || '').trim();
@@ -2759,6 +2760,10 @@
       const [inventoryDefault, setInventoryDefault] = useState('');
       const [inventoryDraft, setInventoryDraft] = useState({});
 
+      // Optional per-variant pricing (saved into product.variants.__prices)
+      const [priceOverridesEnabled, setPriceOverridesEnabled] = useState(false);
+      const [priceOverridesDraft, setPriceOverridesDraft] = useState({});
+
       // Helpers
       const modeIsMulti = (mode) => String(mode || '').toLowerCase().includes('multi');
       const groupIsMulti = (group) => modeIsMulti(group?.mode);
@@ -3503,6 +3508,24 @@
         });
       }, [inventoryEnabled, stockComboKeys]);
 
+      useEffect(() => {
+        if (!priceOverridesEnabled) return;
+        setPriceOverridesDraft((prev) => {
+          const next = {};
+          stockComboKeys.forEach((key) => {
+            next[key] = Object.prototype.hasOwnProperty.call(prev, key) ? prev[key] : '';
+          });
+          const prevKeys = Object.keys(prev);
+          if (
+            prevKeys.length === stockComboKeys.length &&
+            prevKeys.every((key) => Object.prototype.hasOwnProperty.call(next, key) && next[key] === prev[key])
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }, [priceOverridesEnabled, stockComboKeys]);
+
       const applyInventoryDefaultToAll = () => {
         const numeric = Number(inventoryDefault);
         if (!Number.isFinite(numeric) || numeric < 0) return;
@@ -3527,6 +3550,30 @@
         setInventoryDefault('');
       };
 
+      const applyBasePriceToAll = () => {
+        const numeric = Number(price);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(numeric);
+        setPriceOverridesDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            if (key === INVENTORY_BASE_KEY) return;
+            next[key] = value;
+          });
+          return next;
+        });
+      };
+
+      const clearPriceOverridesAll = () => {
+        setPriceOverridesDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = '';
+          });
+          return next;
+        });
+      };
+
       const formatStockComboLabel = (selection) => {
         const entries = Object.entries(selection || {})
           .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
@@ -3540,7 +3587,7 @@
         const cfg = SCHEMA[category] || { must: [], also: [], optional: [], name: null, specs: null };
         const autoName = (cfg.name && cfg.name(form)) || `${category} item`;
         const finalName = name.trim() || autoName;
-        const variantsObj = customerVariants;
+        const variantsObj = { ...(customerVariants || {}) };
 
         const inventoryObj = {};
         if (inventoryEnabled) {
@@ -3551,6 +3598,24 @@
             if (!Number.isFinite(numeric) || numeric < 0) return;
             inventoryObj[(key && key.trim()) || INVENTORY_BASE_KEY] = Math.floor(numeric);
           });
+        }
+
+        if (priceOverridesEnabled) {
+          const basePrice = Number(price);
+          const baseNumeric = Number.isFinite(basePrice) ? basePrice : 0;
+          const priceMap = {};
+          Object.entries(priceOverridesDraft || {}).forEach(([key, raw]) => {
+            if (key === INVENTORY_BASE_KEY) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            if (Math.abs(numeric - baseNumeric) < 1e-9) return;
+            priceMap[(key && key.trim()) || INVENTORY_BASE_KEY] = numeric;
+          });
+          if (Object.keys(priceMap).length) {
+            variantsObj[PRICE_OVERRIDE_VARIANTS_KEY] = priceMap;
+          }
         }
 
         const extraSpecs = [];
@@ -3633,6 +3698,17 @@
           if (invalid) errors.push('Stock quantities must be 0 or greater (or leave blank for unlimited).');
         }
 
+        if (priceOverridesEnabled) {
+          const invalid = Object.entries(priceOverridesDraft || {}).find(([key, raw]) => {
+            if (key === INVENTORY_BASE_KEY) return false;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return false;
+            const numeric = Number(trimmed);
+            return !Number.isFinite(numeric) || numeric < 0;
+          });
+          if (invalid) errors.push('Price overrides must be 0 or greater (or leave blank to use the base price).');
+        }
+
         return errors;
       };
 
@@ -3665,6 +3741,8 @@
           setInventoryEnabled(false);
           setInventoryDefault('');
           setInventoryDraft({});
+          setPriceOverridesEnabled(false);
+          setPriceOverridesDraft({});
         } catch (error) {
           console.error('Failed to add product:', error);
           setSubmitStatus({ type: 'error', message: 'Could not save product. Check your connection and try again.' });
@@ -3795,6 +3873,50 @@
                   onRemove: () => removeGroup('customer', g),
                 });
               })
+            )
+          ),
+
+          React.createElement('div', { className: 'space-y-3' },
+            React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Variant prices (optional)'),
+              React.createElement('label', { className: 'inline-flex items-center gap-2 rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur' },
+                React.createElement('input', {
+                  type: 'checkbox',
+                  checked: priceOverridesEnabled,
+                  onChange: (e) => setPriceOverridesEnabled(e.target.checked),
+                  className: 'h-4 w-4 rounded border-[var(--surface-border)] text-brand focus:ring-brand'
+                }),
+                'Override prices'
+              )
+            ),
+            React.createElement('p', { className: 'text-sm text-slate-600' }, 'Optional. Leave blank to use the base price for a selection.'),
+            priceOverridesEnabled && React.createElement('div', { className: 'space-y-3 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
+              React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-2' },
+                React.createElement('div', { className: 'text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, `Base price: ${price ? fmt(Number(price) || 0) : '—'}`),
+                React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                  React.createElement('button', { type: 'button', onClick: applyBasePriceToAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Copy base to all'),
+                  React.createElement('button', { type: 'button', onClick: clearPriceOverridesAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Clear all')
+                )
+              ),
+              React.createElement('div', { className: 'max-h-72 space-y-2 overflow-y-auto pr-1' },
+                stockCombos
+                  .filter(({ key }) => key !== INVENTORY_BASE_KEY)
+                  .map(({ key, selection }) =>
+                    React.createElement('label', { key, className: 'flex items-center justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner' },
+                      React.createElement('span', { className: 'flex-1 text-xs font-semibold text-slate-700' }, formatStockComboLabel(selection)),
+                      React.createElement('input', {
+                        type: 'number',
+                        min: 0,
+                        step: '0.01',
+                        inputMode: 'decimal',
+                        value: priceOverridesDraft[key] ?? '',
+                        onChange: (e) => setPriceOverridesDraft((prev) => ({ ...prev, [key]: e.target.value })),
+                        placeholder: 'Default',
+                        className: 'w-32 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3 py-2 text-right text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                      })
+                    )
+                  )
+              )
             )
           ),
 
