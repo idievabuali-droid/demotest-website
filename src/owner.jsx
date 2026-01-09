@@ -331,13 +331,16 @@
       const images = Array.isArray(product.images)
         ? product.images
         : (product.image ? [product.image] : []);
-      if (images.length) payload.images = images;
-      if (Array.isArray(product.specs) && product.specs.length) payload.specs = product.specs;
-      if (product.variants && Object.keys(product.variants).length) payload.variants = product.variants;
+      // Always include these fields so edits can CLEAR them (empty array/object)
+      payload.images = images;
+      payload.specs = Array.isArray(product.specs) ? product.specs : [];
+      payload.variants = (product.variants && typeof product.variants === 'object' && !Array.isArray(product.variants))
+        ? product.variants
+        : {};
       if (product.sourceId) payload.sourceid = product.sourceId;
       if (product.hidden) payload.hidden = true;
       const normalizedInventory = normalizeInventoryObject(product.inventory);
-      if (Object.keys(normalizedInventory).length) payload.inventory = normalizedInventory;
+      payload.inventory = normalizedInventory;
       return payload;
     };
 
@@ -4130,14 +4133,53 @@
       );
     }
 
-    function OwnerProductModal({ open, onClose, product, onSave, onHide, onDelete }) {
+    function OwnerProductModal({ open, onClose, product, catalogConfig, onSave, onHide, onDelete }) {
       const ref = useRef(null);
       useFocusTrap(!!open, ref, onClose);
 
+      const makeId = () => Math.random().toString(36).slice(2, 10);
+
+      const parseSpecRows = (specs) => {
+        const cleaned = stripMetaSpecs(specs);
+        return cleaned
+          .map((spec) => {
+            const raw = String(spec || '').trim();
+            const idx = raw.indexOf(':');
+            if (idx > 0) {
+              const label = raw.slice(0, idx).trim();
+              const value = raw.slice(idx + 1).trim();
+              if (label && value) return { id: makeId(), label, value };
+            }
+            return { id: makeId(), label: raw, value: '' };
+          })
+          .filter((row) => row.label);
+      };
+
+      const parseCsvLines = (raw) =>
+        String(raw || '')
+          .split(/[\n,]/g)
+          .map((v) => String(v).trim())
+          .filter(Boolean);
+
+      const normalizePriceOverrides = (raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        const out = {};
+        Object.entries(raw).forEach(([key, value]) => {
+          const normalizedKey = String(key || '').trim();
+          if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+          const numeric = Number(value);
+          if (Number.isFinite(numeric) && numeric >= 0) out[normalizedKey] = numeric;
+        });
+        return out;
+      };
+
       const [name, setName] = useState(product?.name || "");
       const [sku, setSku] = useState(product?.sku || "");
+      const [category, setCategory] = useState(product?.category || "All");
+      const [family, setFamily] = useState(extractFamilyFromProduct(product) || "");
       const [price, setPrice] = useState(String(product?.price ?? 0));
       const [description, setDescription] = useState(product?.description || "");
+      const [specRows, setSpecRows] = useState(() => parseSpecRows(product?.specs));
 
       // images + gallery
       const [images, setImages] = useState(() => {
@@ -4156,19 +4198,75 @@
         return v;
       });
 
+      const [optionDraft, setOptionDraft] = useState({});
+      const [newGroupOpen, setNewGroupOpen] = useState(false);
+      const [newGroupName, setNewGroupName] = useState('');
+      const [newGroupOptions, setNewGroupOptions] = useState('');
+
+      const [inventoryEnabled, setInventoryEnabled] = useState(() => Object.keys(normalizeInventoryObject(product?.inventory)).length > 0);
+      const [inventoryDraft, setInventoryDraft] = useState(() => {
+        const normalized = normalizeInventoryObject(product?.inventory);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(Math.floor(Number(value) || 0));
+        });
+        return out;
+      });
+      const [inventoryDefault, setInventoryDefault] = useState('');
+
+      const [priceOverridesEnabled, setPriceOverridesEnabled] = useState(() => Object.keys(normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY])).length > 0);
+      const [priceOverridesDraft, setPriceOverridesDraft] = useState(() => {
+        const normalized = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(value);
+        });
+        return out;
+      });
+
       useEffect(() => {
         if (!open) return;
         setName(product?.name || "");
         setSku(product?.sku || "");
+        setCategory(product?.category || "All");
+        setFamily(extractFamilyFromProduct(product) || "");
         setPrice(String(product?.price ?? 0));
         setDescription(product?.description || "");
+        setSpecRows(parseSpecRows(product?.specs));
         const list = Array.isArray(product?.images) && product.images.length
           ? product.images
           : (product?.image ? [product.image] : []);
         setImages([...list]);
         setGalleryIndex(0);
-        setVariants({ ...(product?.variants || {}) });
-      }, [open, product]);
+        const nextVariants = { ...(product?.variants || {}) };
+        if (nextVariants.Color && !Array.isArray(nextVariants.Color)) nextVariants.Color = [nextVariants.Color];
+        if (nextVariants.Model && !Array.isArray(nextVariants.Model)) nextVariants.Model = [nextVariants.Model];
+        setVariants(nextVariants);
+        setOptionDraft({});
+        setNewGroupOpen(false);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        const normalizedInventory = normalizeInventoryObject(product?.inventory);
+        setInventoryEnabled(Object.keys(normalizedInventory).length > 0);
+        setInventoryDraft(() => {
+          const out = {};
+          Object.entries(normalizedInventory).forEach(([key, value]) => {
+            out[String(key)] = String(Math.floor(Number(value) || 0));
+          });
+          return out;
+        });
+        setInventoryDefault('');
+        const normalizedPrices = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        setPriceOverridesEnabled(Object.keys(normalizedPrices).length > 0);
+        setPriceOverridesDraft(() => {
+          const out = {};
+          Object.entries(normalizedPrices).forEach(([key, value]) => {
+            out[String(key)] = String(value);
+          });
+          return out;
+        });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [open, product?.id]);
 
       const onFiles = (e) => {
         const files = Array.from(e.target.files || []);
@@ -4184,33 +4282,274 @@
       const prevImg = () => setGalleryIndex(i => (i - 1 + images.length) % images.length);
       const nextImg = () => setGalleryIndex(i => (i + 1) % images.length);
 
+      const familyOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.families)
+          ? catalogConfig.families.map((f) => String(f?.name || '').trim()).filter(Boolean)
+          : [];
+        const base = list.length ? list : ['iPhone', 'Samsung S', 'Samsung A', 'Accessories'];
+        const current = String(family || '').trim();
+        return current && !base.includes(current) ? [...base, current] : base;
+      }, [catalogConfig, family]);
+
+      const categoryOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.categories) ? catalogConfig.categories.filter(Boolean) : [];
+        const base = list.length ? list : CATEGORIES.filter((c) => c !== 'All');
+        const current = String(category || '').trim();
+        const withAll = ['All', ...base];
+        return current && current !== 'All' && !base.includes(current) ? [...withAll, current] : withAll;
+      }, [catalogConfig, category]);
+
+      const familyModels = useMemo(() => {
+        const famName = String(family || '').trim();
+        const families = Array.isArray(catalogConfig?.families) ? catalogConfig.families : [];
+        const match = families.find((f) => String(f?.name || '').trim() === famName);
+        const list = Array.isArray(match?.models) ? match.models.map((m) => String(m).trim()).filter(Boolean) : [];
+        if (list.length) return list;
+        const lower = famName.toLowerCase();
+        if (lower.includes('iphone')) return IPHONE_MODELS;
+        if (lower.includes('samsung s')) return SAMSUNG_S_MODELS;
+        if (lower.includes('samsung a')) return SAMSUNG_A_MODELS;
+        return [...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS];
+      }, [catalogConfig, family]);
+
+      const customerOptionMap = useMemo(() => {
+        const out = {};
+        Object.entries(variants || {}).forEach(([key, val]) => {
+          if (!key || String(key).startsWith('__')) return;
+          if (!Array.isArray(val) || val.length === 0) return;
+          out[key] = val;
+        });
+        return out;
+      }, [variants]);
+
+      const optionKeys = useMemo(() => {
+        const keys = Object.keys(customerOptionMap);
+        const priority = ['Model', 'Color'];
+        keys.sort((a, b) => {
+          const ai = priority.indexOf(a);
+          const bi = priority.indexOf(b);
+          if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+          return a.localeCompare(b);
+        });
+        return keys;
+      }, [customerOptionMap]);
+
+      const combos = useMemo(() => computeVariantCombos(customerOptionMap), [customerOptionMap]);
+      const comboKeySet = useMemo(() => new Set(combos.map(({ key }) => key)), [combos]);
+
+      const formatComboLabel = (selection) => {
+        const entries = Object.entries(selection || {})
+          .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (!entries.length) return 'Base product';
+        return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
+      };
+
+      const models = Array.from(new Set([...(Array.isArray(variants.Model) ? variants.Model : [])]));
+      const colors = Array.from(new Set([...(Array.isArray(variants.Color) ? variants.Color : [])]));
+
+      const moveImageToFront = (index) => {
+        setImages((prev) => {
+          if (index <= 0 || index >= prev.length) return prev;
+          const next = [...prev];
+          const [picked] = next.splice(index, 1);
+          next.unshift(picked);
+          return next;
+        });
+        setGalleryIndex(0);
+      };
+
+      const removeImage = (index) => {
+        setImages((prev) => prev.filter((_, i) => i !== index));
+        setGalleryIndex((i) => {
+          if (i === index) return 0;
+          if (i > index) return i - 1;
+          return i;
+        });
+      };
+
+      const setRowField = (id, field, value) => {
+        setSpecRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+      };
+      const addSpecRow = () => setSpecRows((prev) => [...prev, { id: makeId(), label: '', value: '' }]);
+      const removeSpecRow = (id) => setSpecRows((prev) => prev.filter((row) => row.id !== id));
+
+      const setGroupOptions = (groupKey, list) => {
+        const key = String(groupKey || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const cleaned = Array.from(new Set((Array.isArray(list) ? list : []).map((v) => String(v).trim()).filter(Boolean)));
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          if (cleaned.length) next[key] = cleaned;
+          else delete next[key];
+          return next;
+        });
+      };
+
+      const removeGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+        setOptionDraft((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+      };
+
+      const addOptionsToGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        const parsed = parseCsvLines(optionDraft[key] || '');
+        if (!parsed.length) return;
+        const current = Array.isArray(variants?.[key]) ? variants[key] : [];
+        setGroupOptions(key, [...current, ...parsed]);
+        setOptionDraft((prev) => ({ ...(prev || {}), [key]: '' }));
+      };
+
+      const createNewGroup = () => {
+        const key = String(newGroupName || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const parsed = parseCsvLines(newGroupOptions);
+        if (!parsed.length) return;
+        setGroupOptions(key, parsed);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        setNewGroupOpen(false);
+      };
+
+      const applyInventoryDefaultToAll = () => {
+        const trimmed = String(inventoryDefault || '').trim();
+        if (!trimmed) return;
+        const numeric = Number(trimmed);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(Math.floor(numeric));
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = value; });
+          return next;
+        });
+      };
+
+      const clearInventoryAll = () => {
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = ''; });
+          return next;
+        });
+      };
+
+      const clearPricesAll = () => {
+        setPriceOverridesDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { if (key !== INVENTORY_BASE_KEY) next[key] = ''; });
+          return next;
+        });
+      };
+
       const save = () => {
-        const sanitizedVariants = Object.fromEntries(
-          Object.entries(variants || {}).map(([key, val]) => {
-            const list = Array.isArray(val) ? val.map(v => String(v).trim()).filter(Boolean) : [];
-            return [key, Array.from(new Set(list))];
-          }).filter(([, list]) => Array.isArray(list) && list.length)
-        );
         const trimmedName = name.trim() || product.name;
         const trimmedSku = sku.trim() || product.sku;
         const priceNumber = Number(price);
+        const resolvedPrice = Number.isFinite(priceNumber) && priceNumber >= 0 ? priceNumber : Number(product.price) || 0;
+        const resolvedCategory = String(category || product.category || '').trim() || 'All';
+        const resolvedFamily = String(family || '').trim();
+
+        const existingMetaSpecs = (Array.isArray(product?.specs) ? product.specs : [])
+          .filter((s) => {
+            const value = String(s || '');
+            return value && value.startsWith(META_SPEC_PREFIX) && !value.startsWith(META_FAMILY_PREFIX);
+          })
+          .map((s) => String(s));
+
+        const infoSpecs = specRows
+          .map((row) => {
+            const label = String(row?.label || '').trim();
+            if (!label) return null;
+            const value = String(row?.value || '').trim();
+            return value ? `${label}: ${value}` : label;
+          })
+          .filter(Boolean);
+
+        const specs = Array.from(new Set([
+          ...(resolvedFamily ? [`${META_FAMILY_PREFIX}${resolvedFamily}`] : []),
+          ...existingMetaSpecs,
+          ...infoSpecs,
+        ]));
+
+        const preservedMetaVariants = {};
+        if (product?.variants && typeof product.variants === 'object' && !Array.isArray(product.variants)) {
+          Object.entries(product.variants).forEach(([key, val]) => {
+            if (!key || key === PRICE_OVERRIDE_VARIANTS_KEY) return;
+            if (Array.isArray(val)) return;
+            if (String(key).startsWith('__')) preservedMetaVariants[key] = val;
+          });
+        }
+
+        const sanitizedGroups = {};
+        Object.entries(customerOptionMap || {}).forEach(([key, val]) => {
+          const label = String(key || '').trim();
+          if (!label) return;
+          const list = Array.from(new Set((Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter(Boolean)));
+          if (list.length) sanitizedGroups[label] = list;
+        });
+
+        const nextVariants = { ...preservedMetaVariants, ...sanitizedGroups };
+
+        if (priceOverridesEnabled) {
+          const baseNumeric = resolvedPrice;
+          const priceMap = {};
+          Object.entries(priceOverridesDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            if (Math.abs(numeric - baseNumeric) < 1e-9) return;
+            priceMap[normalizedKey] = numeric;
+          });
+          if (Object.keys(priceMap).length) nextVariants[PRICE_OVERRIDE_VARIANTS_KEY] = priceMap;
+        }
+
+        const nextInventory = {};
+        if (inventoryEnabled) {
+          Object.entries(inventoryDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            nextInventory[normalizedKey] = Math.floor(numeric);
+          });
+        }
+
+        const uniqueImages = Array.from(new Set((images || []).map((src) => String(src || '')).filter(Boolean)));
         const normalized = normalizeProductRow({
           ...(product || {}),
           name: trimmedName,
           sku: trimmedSku,
-          price: Number.isFinite(priceNumber) && priceNumber > 0 ? priceNumber : Number(product.price) || 0,
+          category: resolvedCategory,
+          price: resolvedPrice,
           description,
-          images: images.length ? images : undefined,
-          image: images[0] || undefined,
-          variants: sanitizedVariants
+          images: uniqueImages,
+          image: uniqueImages[0] || undefined,
+          specs,
+          variants: nextVariants,
+          inventory: nextInventory,
         });
         onSave(normalized, product?.id);
         onClose();
       };
 
       const isOwnerItem = !!product?.id?.startsWith?.('owner-');
-      const models = Array.from(new Set([...(variants.Model || [])]));
-      const colors = Array.from(new Set([...(variants.Color || [])]));
 
       if (!open || !product) return null;
 
@@ -4272,7 +4611,7 @@
                         <button type="button" onClick={()=> setGalleryIndex(i)} className="absolute inset-0">
                           <img src={resolveImageSrc(src, product.name)} alt="" className="h-full w-full object-cover" />
                         </button>
-                        <button type="button" onClick={()=> setImages(prev => prev.filter((_,idx)=> idx!==i))}
+                        <button type="button" onClick={()=> removeImage(i)}
                           className="absolute -right-1 -top-1 rounded-full bg-white border p-0.5 shadow" aria-label={`Remove photo ${i+1}`}>×</button>
                       </div>
                     ))}
@@ -4282,6 +4621,27 @@
 
               {/* Right: editable form */}
               <div className="flex min-w-0 flex-col gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Family</span>
+                    <select value={family} onChange={(e) => setFamily(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      <option value="">(none)</option>
+                      {familyOptions.map((f) => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Category</span>
+                    <select value={category} onChange={(e) => setCategory(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      {categoryOptions.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <label className="block text-sm">
                   <span className="mb-1 block text-slate-700">Name</span>
                   <input value={name} onChange={(e)=> setName(e.target.value)}
@@ -4295,7 +4655,7 @@
                 </label>
 
                 <label className="block text-sm">
-                  <span className="mb-1 block text-slate-700">Price</span>
+                  <span className="mb-1 block text-slate-700">Base price</span>
                   <input type="number" min={0} step="0.01" value={price} onChange={(e)=> setPrice(e.target.value)}
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
@@ -4306,59 +4666,231 @@
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
 
-                {/* Variants — same idea as your previous editor but cleaner */}
-                <div className="grid gap-3">
-                  {!!(product?.variants?.Model) && (
-                    <PillsMulti
-                      label="Models"
-                      options={[...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS]}
-                      value={models}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Model: arr }))}
-                    />
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Product information</span>
+                    <button type="button" onClick={addSpecRow}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white">Add</button>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {specRows.map((row) => (
+                      <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center">
+                        <input
+                          value={row.label}
+                          onChange={(e) => setRowField(row.id, 'label', e.target.value)}
+                          placeholder="Label"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <input
+                          value={row.value}
+                          onChange={(e) => setRowField(row.id, 'value', e.target.value)}
+                          placeholder="Value (optional)"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeSpecRow(row.id)}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                          aria-label="Remove row"
+                        >×</button>
+                      </div>
+                    ))}
+                    {specRows.length === 0 && (
+                      <p className="text-xs text-slate-500">No product information yet.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Customer options</span>
+                    <button
+                      type="button"
+                      onClick={() => setNewGroupOpen((v) => !v)}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                    >
+                      Add option group
+                    </button>
+                  </div>
+
+                  {newGroupOpen && (
+                    <div className="mt-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Group name</span>
+                          <input
+                            value={newGroupName}
+                            onChange={(e) => setNewGroupName(e.target.value)}
+                            placeholder="e.g. RAM"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Options</span>
+                          <textarea
+                            rows={2}
+                            value={newGroupOptions}
+                            onChange={(e) => setNewGroupOptions(e.target.value)}
+                            placeholder="One per line or comma-separated"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-2 flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setNewGroupOpen(false); setNewGroupName(''); setNewGroupOptions(''); }}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                        >
+                          Cancel
+                        </button>
+                        <button type="button" onClick={createNewGroup} className="rounded-full bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-muted">
+                          Add group
+                        </button>
+                      </div>
+                    </div>
                   )}
-                  {!!(product?.variants?.Color) && (
-                    <PillsMulti
-                      label="Colors"
-                      options={CASE_COLORS}
-                      value={colors}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Color: arr }))}
-                    />
-                  )}
-                  {Object.entries(product?.variants||{})
-                    .filter(([k])=> k!=='Model' && k!=='Color')
-                    .map(([k,opts])=> (
-                      <div key={k} className="text-sm">
-                        <span className="mb-1 block text-slate-700">{k}</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {(variants[k]||opts).map(opt => (
-                            <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600">
-                              {opt}
-                              <button type="button" onClick={()=> setVariants(v=> ({...v, [k]: (v[k]||opts).filter(x=> x!==opt)}))} aria-label={`Remove ${opt}`}>×</button>
-                            </span>
-                          ))}
+
+                  <div className="mt-3 grid gap-3">
+                    {optionKeys.length === 0 && (
+                      <p className="text-xs text-slate-500">No customer option groups yet.</p>
+                    )}
+                    {optionKeys.map((k) => {
+                      const opts = Array.isArray(variants?.[k]) ? variants[k] : [];
+                      const draft = optionDraft[k] || '';
+                      const optionsList = k === 'Model'
+                        ? Array.from(new Set([...(familyModels || []), ...opts]))
+                        : (k === 'Color' ? Array.from(new Set([...(CASE_COLORS || []), ...opts])) : opts);
+
+                      return (
+                        <div key={k} className="space-y-2 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-slate-800">{k}</span>
+                            <button type="button" onClick={() => removeGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                              aria-label={`Remove ${k}`}>×</button>
+                          </div>
+
+                          {k === 'Model' || k === 'Color' ? (
+                            <PillsMulti
+                              label={k === 'Model' ? 'Models' : 'Colors'}
+                              options={optionsList}
+                              value={opts}
+                              onChange={(arr) => setGroupOptions(k, arr)}
+                            />
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5 text-xs">
+                              {opts.map((opt) => (
+                                <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white px-2.5 py-1 text-xs font-medium text-slate-600">
+                                  {opt}
+                                  <button type="button" onClick={() => setGroupOptions(k, opts.filter((x) => x !== opt))}
+                                    className="text-slate-500 hover:text-slate-800" aria-label={`Remove ${opt}`}>×</button>
+                                </span>
+                              ))}
+                              {opts.length === 0 && <span className="text-xs text-slate-500">No options yet.</span>}
+                            </div>
+                          )}
+
+                          <div className="flex gap-2">
+                            <input
+                              value={draft}
+                              onChange={(e) => setOptionDraft((prev) => ({ ...(prev || {}), [k]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addOptionsToGroup(k);
+                                }
+                              }}
+                              placeholder="Add options (comma or newline)"
+                              className="flex-1 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                            <button type="button" onClick={() => addOptionsToGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Add</button>
+                          </div>
                         </div>
-                        <div className="mt-1 flex gap-2">
-                          <input type="text" placeholder={`Add ${k} option`} className="w-44 rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-medium text-slate-700 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onKeyDown={(e)=> {
-                              if (e.key==='Enter') {
-                                const val = e.currentTarget.value.trim();
-                                if (val) setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                e.currentTarget.value='';
-                              }
-                            }}/>
-                          <button type="button" className="rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onClick={(e)=> {
-                              const inp = e.currentTarget.previousSibling;
-                              if (inp && inp.value) {
-                                const val = inp.value.trim();
-                                setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                inp.value='';
-                              }
-                            }}>Add</button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Stock limits (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={inventoryEnabled} onChange={(e) => setInventoryEnabled(e.target.checked)} />
+                      Limit stock
+                    </label>
+                  </div>
+                  {inventoryEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <input
+                          value={inventoryDefault}
+                          onChange={(e) => setInventoryDefault(e.target.value)}
+                          inputMode="numeric"
+                          placeholder="Default (optional)"
+                          className="w-full sm:w-44 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <div className="flex gap-2">
+                          <button type="button" onClick={applyInventoryDefaultToAll}
+                            className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Apply to all</button>
+                          <button type="button" onClick={clearInventoryAll}
+                            className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear</button>
                         </div>
                       </div>
-                    ))
-                  }
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => (
+                          <div key={key} className="flex items-center justify-between gap-3">
+                            <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                            <input
+                              value={inventoryDraft[key] ?? ''}
+                              onChange={(e) => setInventoryDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                              inputMode="numeric"
+                              placeholder="∞"
+                              className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank for unlimited stock.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Variant prices (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={priceOverridesEnabled} onChange={(e) => setPriceOverridesEnabled(e.target.checked)} />
+                      Override prices
+                    </label>
+                  </div>
+                  {priceOverridesEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex justify-end">
+                        <button type="button" onClick={clearPricesAll}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear overrides</button>
+                      </div>
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => {
+                          if (key === INVENTORY_BASE_KEY) return null;
+                          return (
+                            <div key={key} className="flex items-center justify-between gap-3">
+                              <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                              <input
+                                value={priceOverridesDraft[key] ?? ''}
+                                onChange={(e) => setPriceOverridesDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                                inputMode="decimal"
+                                placeholder={String(Number(price) || 0)}
+                                className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank to use the base price.</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-2 flex justify-end gap-3">
@@ -4372,7 +4904,7 @@
       );
     }
 
-    function OwnerManager({ products, onClose, onEdit, onHide, onDelete, onSave }) {
+    function OwnerManager({ products, catalogConfig, onClose, onEdit, onHide, onDelete, onSave }) {
       const [search, setSearch] = useState("");
       const [editing, setEditing] = useState(null);
 
@@ -4408,7 +4940,7 @@
               )
             ),
             React.createElement('div', { className: 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white transition hover:-translate-y-0.5 hover:shadow-soft-xl' }, React.createElement('div', { className: 'aspect-square w-full bg-slate-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-slate-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 text-xs font-medium text-slate-600' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-slate-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-muted' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-[var(--surface-border)] bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white/90' }, 'Hide')))))) ),
-          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, onSave: onSave, onHide: onHide, onDelete: onDelete })
+          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, catalogConfig: catalogConfig, onSave: onSave, onHide: onHide, onDelete: onDelete })
         )
       );
     }
@@ -4594,6 +5126,7 @@
           icon: ClipboardIcon,
           element: React.createElement(OwnerManager, {
             products: allProducts,
+            catalogConfig,
             onClose: () => setOwnerSection('add'),
             onEdit: (p) => setSelectedProduct({ __edit: true, product: p }),
             onHide: (baseId) => hideBase(baseId),
