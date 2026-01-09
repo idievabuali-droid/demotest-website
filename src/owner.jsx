@@ -83,6 +83,7 @@
     const OWNER_API_ENDPOINT = '/.netlify/functions/catalogue';
     const OWNER_DEFAULT_CURRENCY = CURRENCY;
     const INVENTORY_BASE_KEY = '__base__';
+    const PRICE_OVERRIDE_VARIANTS_KEY = '__prices';
 
     const normalizeVariantLabel = (label, key) => {
       const fallback = (label || key || '').trim();
@@ -232,11 +233,26 @@
       }
     };
 
+    const getOwnerAuthHeader = async () => {
+      try {
+        if (!supabase) return null;
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        return token ? `Bearer ${token}` : null;
+      } catch {
+        return null;
+      }
+    };
+
     const callOwnerApi = async (action, payload) => {
       try {
+        const authHeader = await getOwnerAuthHeader();
         const response = await fetch(OWNER_API_ENDPOINT, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authHeader ? { Authorization: authHeader } : {}),
+          },
           body: JSON.stringify({ action, data: payload }),
         });
         if (!response.ok) {
@@ -315,13 +331,16 @@
       const images = Array.isArray(product.images)
         ? product.images
         : (product.image ? [product.image] : []);
-      if (images.length) payload.images = images;
-      if (Array.isArray(product.specs) && product.specs.length) payload.specs = product.specs;
-      if (product.variants && Object.keys(product.variants).length) payload.variants = product.variants;
+      // Always include these fields so edits can CLEAR them (empty array/object)
+      payload.images = images;
+      payload.specs = Array.isArray(product.specs) ? product.specs : [];
+      payload.variants = (product.variants && typeof product.variants === 'object' && !Array.isArray(product.variants))
+        ? product.variants
+        : {};
       if (product.sourceId) payload.sourceid = product.sourceId;
       if (product.hidden) payload.hidden = true;
       const normalizedInventory = normalizeInventoryObject(product.inventory);
-      if (Object.keys(normalizedInventory).length) payload.inventory = normalizedInventory;
+      payload.inventory = normalizedInventory;
       return payload;
     };
 
@@ -442,6 +461,56 @@
       "Samsung S": SAMSUNG_S_MODELS,
       "Samsung A": SAMSUNG_A_MODELS
     };
+
+    const CONFIG_PRODUCT_ID = '__catalog_config__';
+    const META_SPEC_PREFIX = '__';
+    const META_FAMILY_PREFIX = '__family:';
+
+    const stripMetaSpecs = (specs) =>
+      (Array.isArray(specs) ? specs : []).filter((s) => {
+        const value = String(s || '');
+        return value && !value.startsWith(META_SPEC_PREFIX);
+      });
+
+    const extractFamilyFromProduct = (product) => {
+      const specs = Array.isArray(product?.specs) ? product.specs : [];
+      const match = specs.find((s) => typeof s === 'string' && s.startsWith(META_FAMILY_PREFIX));
+      return match ? String(match).slice(META_FAMILY_PREFIX.length).trim() : '';
+    };
+
+    const normalizeGroupKey = (label, key) => {
+      if (key === 'models') return 'Model';
+      const lower = String(label ?? key ?? '').toLowerCase().trim();
+      if (lower === 'color' || lower === 'colors' || lower === 'colour') return 'Color';
+      if (lower === 'model' || lower === 'models') return 'Model';
+      return String(label ?? key ?? '').trim();
+    };
+
+	    const buildDefaultCatalogConfig = () => ({
+	      version: 1,
+	      categories: CATEGORIES.filter((c) => c !== 'All'),
+	      families: [
+	        { id: 'iphone', name: 'iPhone', models: [...IPHONE_MODELS] },
+	        { id: 'samsung_s', name: 'Samsung S', models: [...SAMSUNG_S_MODELS] },
+	        { id: 'samsung_a', name: 'Samsung A', models: [...SAMSUNG_A_MODELS] },
+	        { id: 'accessories', name: 'Accessories', models: [] },
+	      ],
+	      groupsByCategory: {},
+	      groupOverridesByCategoryFamily: {},
+	      groupHiddenByCategoryFamily: {},
+	    });
+
+	    const mergeCatalogConfig = (raw) => {
+	      const base = buildDefaultCatalogConfig();
+	      if (!raw || typeof raw !== 'object') return base;
+	      const next = { ...base, ...raw };
+	      next.categories = Array.isArray(next.categories) ? next.categories.filter(Boolean) : base.categories;
+	      next.families = Array.isArray(next.families) ? next.families.filter(Boolean) : base.families;
+	      next.groupsByCategory = next.groupsByCategory && typeof next.groupsByCategory === 'object' ? next.groupsByCategory : {};
+	      next.groupOverridesByCategoryFamily = next.groupOverridesByCategoryFamily && typeof next.groupOverridesByCategoryFamily === 'object' ? next.groupOverridesByCategoryFamily : {};
+	      next.groupHiddenByCategoryFamily = next.groupHiddenByCategoryFamily && typeof next.groupHiddenByCategoryFamily === 'object' ? next.groupHiddenByCategoryFamily : {};
+	      return next;
+	    };
 
     // Common lists
     const QUALITY_GRADE = ["Original","OEM","AAA","Aftermarket","Refurb"];
@@ -654,6 +723,9 @@
     }
 
     function useFocusTrap(active, ref, onEscape){
+      const onEscapeRef = useRef(onEscape);
+      useEffect(() => { onEscapeRef.current = onEscape; }, [onEscape]);
+
       useEffect(()=>{
         if(!active || !ref.current) return;
         const root = ref.current;
@@ -661,30 +733,42 @@
           'a[href]','button:not([disabled])','textarea:not([disabled])','input:not([disabled])','select:not([disabled])','[tabindex]:not([tabindex="-1"])'
         ].join(',');
         const previous = document.activeElement;
-        const list = Array.from(root.querySelectorAll(qs));
-        if (!list.length) {
-          if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1');
-          if (typeof root.focus === 'function') root.focus({ preventScroll: true });
-        } else {
+
+        const focusFirst = () => {
+          const list = Array.from(root.querySelectorAll(qs));
+          if (!list.length) {
+            if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1');
+            if (typeof root.focus === 'function') root.focus({ preventScroll: true });
+            return;
+          }
           const target = list[0];
           if (target && typeof target.focus === 'function') target.focus({ preventScroll: true });
-        }
+        };
+
+        focusFirst();
+
         const onKey = (e)=>{
-          if(e.key==='Escape'){ e.stopPropagation(); onEscape?.(); }
-          if(e.key==='Tab' && list.length){ const first=list[0], last=list[list.length-1]; if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); } else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); } }
+          if(e.key==='Escape'){
+            e.stopPropagation();
+            onEscapeRef.current?.();
+            return;
+          }
+          if(e.key==='Tab'){
+            const list = Array.from(root.querySelectorAll(qs));
+            if(!list.length) return;
+            const first=list[0], last=list[list.length-1];
+            if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+            else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+          }
         };
         root.addEventListener('keydown', onKey);
         return ()=>{
           root.removeEventListener('keydown', onKey);
           if(previous && typeof previous.focus === 'function' && document.contains(previous)){
-            try {
-              previous.focus({ preventScroll: true });
-            } catch {
-              previous.focus();
-            }
+            try { previous.focus({ preventScroll: true }); } catch { previous.focus(); }
           }
         };
-      },[active, ref, onEscape]);
+      },[active]);
     }
 
     function useBodyScrollLock(active, preferredScrollRef){
@@ -733,6 +817,170 @@
       }, [active, preferredScrollRef]);
     }
 
+    function OwnerModalShell({ open, title, onClose, children, actions }) {
+      const ref = useRef(null);
+      useFocusTrap(!!open, ref, onClose);
+      if (!open) return null;
+      return React.createElement('div', { className: 'fixed inset-0 z-50 flex items-center justify-center p-4' },
+        React.createElement('div', { className: 'absolute inset-0 bg-black/40', onClick: onClose, 'aria-hidden': 'true' }),
+        React.createElement('div', { ref, role: 'dialog', 'aria-modal': 'true', className: 'relative w-full max-w-lg rounded-3xl border border-[var(--surface-border)] bg-white p-5 shadow-soft-xl' },
+          React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+            React.createElement('h3', { className: 'text-lg font-semibold text-slate-900' }, title),
+            React.createElement('button', { type: 'button', onClick: onClose, className: 'rounded-full p-2 text-slate-500 hover:bg-slate-100', 'aria-label': 'Close' }, '×')
+          ),
+          React.createElement('div', { className: 'mt-4 space-y-4' }, children),
+          actions && React.createElement('div', { className: 'mt-5 flex justify-end gap-2' }, actions)
+        )
+      );
+    }
+
+    function OwnerInfoDropdown({ label, mode, fieldType, options, value, onChange, onEdit, onRemove }) {
+      const isCheckbox = fieldType === 'checkbox';
+      const resolvedModeRaw = String(isCheckbox ? 'single' : (mode || 'single')).toLowerCase().trim();
+      const resolvedMode = resolvedModeRaw.includes('multi') ? 'multi' : 'single';
+      const opts = isCheckbox ? ['Yes', 'No'] : (Array.isArray(options) ? options : []);
+
+      const [open, setOpen] = useState(false);
+      const ref = useRef(null);
+
+      useEffect(() => {
+        if (!open) return;
+        const onDoc = (e) => {
+          if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+        };
+        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('touchstart', onDoc);
+        return () => {
+          document.removeEventListener('mousedown', onDoc);
+          document.removeEventListener('touchstart', onDoc);
+        };
+      }, [open]);
+
+      const currentBool = !!value;
+      const currentMulti = Array.isArray(value) ? value : [];
+      const currentSingle = typeof value === 'string' ? value : (value == null ? '' : String(value));
+
+      const display = (() => {
+        if (isCheckbox) return currentBool ? 'Yes' : 'No';
+        if (resolvedMode === 'multi') return currentMulti.length ? `${currentMulti.length} selected` : 'Select...';
+        return currentSingle || 'Select...';
+      })();
+
+      const clear = () => {
+        if (isCheckbox) onChange(false);
+        else if (resolvedMode === 'multi') onChange([]);
+        else onChange('');
+      };
+
+      const toggle = (opt) => {
+        if (isCheckbox) {
+          onChange(opt === 'Yes');
+          setOpen(false);
+          return;
+        }
+        if (resolvedMode === 'multi') {
+          const next = currentMulti.includes(opt) ? currentMulti.filter((x) => x !== opt) : [...currentMulti, opt];
+          onChange(next);
+          return;
+        }
+        onChange(opt);
+        setOpen(false);
+      };
+
+      return React.createElement('div', { ref, className: cx('relative rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur', open && 'z-30') },
+        React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+          React.createElement('div', { className: 'flex-1' },
+            React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, label),
+            React.createElement('button', {
+              type: 'button',
+              onClick: () => setOpen((v) => !v),
+              className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-left text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+              'aria-expanded': open ? 'true' : 'false',
+            }, display)
+          ),
+          React.createElement('div', { className: 'mt-6 flex items-center gap-1' },
+            React.createElement('button', { type: 'button', onClick: onEdit, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white' }, 'Edit'),
+            React.createElement('button', { type: 'button', onClick: clear, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white', title: 'Clear' }, 'Clear'),
+            React.createElement('button', { type: 'button', onClick: onRemove, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white', 'aria-label': `Remove ${label}` }, '×')
+          )
+        ),
+        open && React.createElement('div', { className: 'absolute left-4 right-4 top-[78px] z-40 overflow-hidden rounded-2xl border border-[var(--surface-border)] bg-white shadow-soft-xl' },
+          React.createElement('div', { className: 'max-h-64 overflow-y-auto p-2' },
+            opts.map((opt) => {
+              const checked = isCheckbox
+                ? (opt === 'Yes' ? currentBool : !currentBool)
+                : (resolvedMode === 'multi' ? currentMulti.includes(opt) : currentSingle === opt);
+              return React.createElement('button', {
+                key: opt,
+                type: 'button',
+                onClick: () => toggle(opt),
+                className: cx('flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition', checked ? 'bg-brand-soft text-slate-900' : 'hover:bg-slate-50'),
+              },
+                React.createElement('span', { className: cx('inline-flex h-4 w-4 items-center justify-center rounded border', checked ? 'border-brand bg-brand text-white' : 'border-[var(--surface-border)] bg-white') }, checked ? '✓' : ''),
+                React.createElement('span', { className: 'flex-1' }, opt)
+              );
+            })
+          ),
+          React.createElement('div', { className: 'flex items-center justify-end border-t border-[var(--surface-border)] bg-white/80 px-3 py-2 text-xs' },
+            React.createElement('button', { type: 'button', onClick: () => setOpen(false), className: 'rounded-full bg-brand px-3 py-1 font-semibold text-white hover:bg-brand-muted' }, 'Done')
+          )
+        )
+      );
+    }
+
+    function OwnerCustomerChips({ label, mode, options, value, onChange, onEdit, onRemove }) {
+      const opts = Array.isArray(options) ? options : [];
+      const resolvedModeRaw = String(mode || 'multi').toLowerCase().trim();
+      const resolvedMode = resolvedModeRaw.includes('multi') ? 'multi' : 'single';
+      const currentMulti = Array.isArray(value) ? value : [];
+      const currentSingle = typeof value === 'string' ? value : (value == null ? '' : String(value));
+
+      const toggle = (opt) => {
+        if (resolvedMode === 'multi') {
+          const next = currentMulti.includes(opt) ? currentMulti.filter((x) => x !== opt) : [...currentMulti, opt];
+          onChange(next);
+          return;
+        }
+        onChange(currentSingle === opt ? '' : opt);
+      };
+
+      return React.createElement('div', { className: 'space-y-2 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
+        React.createElement('div', { className: 'flex items-center justify-between gap-2' },
+          React.createElement('span', { className: 'text-sm font-semibold text-slate-800' }, label),
+          React.createElement('div', { className: 'flex items-center gap-1 text-xs' },
+            resolvedMode === 'multi' && opts.length > 0 && React.createElement('button', {
+              type: 'button',
+              onClick: () => {
+                onChange(opts);
+              },
+              className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium text-slate-600 hover:bg-white/60'
+            }, 'All'),
+            resolvedMode === 'multi' && React.createElement('button', {
+              type: 'button',
+              onClick: () => {
+                onChange([]);
+              },
+              className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium text-slate-600 hover:bg-white/60'
+            }, 'Clear'),
+            React.createElement('button', { type: 'button', onClick: onEdit, className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium text-slate-600 hover:bg-white/60' }, 'Edit'),
+            React.createElement('button', { type: 'button', onClick: onRemove, className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium text-slate-600 hover:bg-white/60', 'aria-label': `Remove ${label}` }, '×')
+          )
+        ),
+        React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-xs' },
+          opts.map((opt) => {
+            const on = resolvedMode === 'multi' ? currentMulti.includes(opt) : currentSingle === opt;
+            const showDot = (COLOR_SWATCH[opt] !== undefined) || /color/i.test(label);
+            return React.createElement('button', {
+              type: 'button',
+              key: opt,
+              onClick: () => toggle(opt),
+              className: cx('inline-flex items-center gap-1 rounded-full border px-2.5 py-1 font-medium transition', on ? 'border-transparent bg-brand text-white shadow-sm' : 'border-[var(--surface-border)] bg-white/80 text-slate-700 hover:text-slate-900 hover:bg-white')
+            }, showDot ? React.createElement(React.Fragment, null, React.createElement(ColorDot, { name: opt }), opt) : opt);
+          })
+        )
+      );
+    }
+
     // ---- Cart state ----
     /** @typedef {{ id: string, name: string, sku: string, price: number, qty: number, variants?: Record<string,string> }} CartItem */
     function useCart(){
@@ -746,6 +994,53 @@
       const clear = ()=> setItems([]);
       const subtotal = items.reduce((s,it)=> s + it.price*it.qty, 0);
       return { items, add, updateQty, removeIndex, clear, subtotal, notes, setNotes };
+    }
+
+    function useCatalogConfig(ownerProducts, setOwnerProducts) {
+      const [catalogConfig, setCatalogConfig] = useState(() => buildDefaultCatalogConfig());
+
+      useEffect(() => {
+        const configRow = (ownerProducts || []).find((p) => p && p.id === CONFIG_PRODUCT_ID);
+        const raw = configRow?.variants?.__config;
+        if (raw && typeof raw === 'object') {
+          setCatalogConfig(mergeCatalogConfig(raw));
+        }
+      }, [ownerProducts]);
+
+      const saveCatalogConfig = async (nextConfig) => {
+        const merged = mergeCatalogConfig(nextConfig);
+        setCatalogConfig(merged);
+
+        const configProduct = normalizeProductRow({
+          id: CONFIG_PRODUCT_ID,
+          name: '__catalog_config__',
+          sku: '__catalog_config__',
+          category: 'All',
+          price: 0,
+          description: 'Internal catalog config row',
+          hidden: true,
+          images: [],
+          specs: [],
+          variants: { __config: merged },
+          inventory: {},
+        });
+
+        const saved = await upsertProductToDatabase(configProduct);
+        if (saved) {
+          setOwnerProducts((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            const idx = list.findIndex((p) => p && p.id === CONFIG_PRODUCT_ID);
+            if (idx >= 0) {
+              const next = [...list];
+              next[idx] = saved;
+              return next;
+            }
+            return [saved, ...list];
+          });
+        }
+      };
+
+      return { catalogConfig, saveCatalogConfig };
     }
 
     // ---- Owner products with Supabase integration ----
@@ -2415,15 +2710,34 @@
     }
 
     // ---- Owner Page (Schema-driven) ----
-    function OwnerPage({ addProduct, products, removeProduct, onNotify }) {
+    function OwnerPage({ addProduct, onNotify, catalogConfig, saveCatalogConfig }) {
       // Base fields
-      const [category, setCategory] = useState(/** @type Category */("Phone Screens"));
+      const categories = Array.isArray(catalogConfig?.categories) && catalogConfig.categories.length
+        ? catalogConfig.categories
+        : CATEGORIES.filter((c) => c !== 'All');
+      const families = Array.isArray(catalogConfig?.families) && catalogConfig.families.length
+        ? catalogConfig.families
+        : buildDefaultCatalogConfig().families;
+
+      const [category, setCategory] = useState(/** @type Category */(categories[0] || "Phone Screens"));
+      const [familyId, setFamilyId] = useState(families[0]?.id || 'iphone');
+      const family = families.find((f) => f && f.id === familyId) || families[0] || { name: 'iPhone', models: IPHONE_MODELS };
+      const familyModels = Array.isArray(family?.models) ? family.models : [];
+
+      useEffect(() => {
+        if (!categories.includes(category)) setCategory(categories[0] || "Phone Screens");
+      }, [categories]);
+
+      useEffect(() => {
+        if (!families.some((f) => f && f.id === familyId)) setFamilyId(families[0]?.id || 'iphone');
+      }, [families]);
+
       const [name, setName] = useState("");
       // Prefill Name with "<Category> — " whenever category changes,
       // but do not overwrite if the owner already typed a custom name.
       useEffect(() => {
         setName(prev => {
-          const scaffoldSet = new Set(CATEGORIES);
+          const scaffoldSet = new Set(categories);
           const prevTrim = (prev || "").trim();
           const looksLikeScaffold =
             scaffoldSet.has(prevTrim.replace(" —", "")) || prevTrim.endsWith(" —");
@@ -2432,7 +2746,7 @@
           }
           return prev;
         });
-      }, [category]);
+      }, [category, categories]);
       const [sku, setSku] = useState("");
       const [price, setPrice] = useState("");
   const [description, setDescription] = useState("");
@@ -2444,7 +2758,89 @@
       // Dynamic form state
       const [form, setForm] = useState({});
 
+      // Optional stock limits (saved into product.inventory)
+      const [inventoryEnabled, setInventoryEnabled] = useState(false);
+      const [inventoryDefault, setInventoryDefault] = useState('');
+      const [inventoryDraft, setInventoryDraft] = useState({});
+
+      // Optional per-variant pricing (saved into product.variants.__prices)
+      const [priceOverridesEnabled, setPriceOverridesEnabled] = useState(false);
+      const [priceOverridesDraft, setPriceOverridesDraft] = useState({});
+
       // Helpers
+      const modeIsMulti = (mode) => String(mode || '').toLowerCase().includes('multi');
+      const groupIsMulti = (group) => modeIsMulti(group?.mode);
+      const normalizeMode = (mode) => (modeIsMulti(mode) ? 'multi' : 'single');
+      const normalizeOptionsSource = (value) => (value === 'familyModels' ? 'familyModels' : 'static');
+
+      const normalizeGroup = (group, scope) => {
+        if (!group || typeof group !== 'object') return group;
+        const next = { ...group };
+        next.mode = normalizeMode(group.mode);
+        next.optionsSource = normalizeOptionsSource(group.optionsSource);
+        next.options = Array.isArray(group.options) ? group.options : [];
+        if (scope === 'customer') {
+          next.fieldType = 'select';
+        } else {
+          next.fieldType = group.fieldType === 'checkbox' ? 'checkbox' : 'select';
+        }
+        return next;
+      };
+
+      const normalizeGroupConfig = (cfg) => ({
+        info: (cfg?.info || []).map((g) => normalizeGroup(g, 'info')).filter(Boolean),
+        customer: (cfg?.customer || []).map((g) => normalizeGroup(g, 'customer')).filter(Boolean),
+      });
+
+      const getFamilyGroupOverrides = () => {
+        const byCategory = catalogConfig?.groupOverridesByCategoryFamily?.[category];
+        const byFamily = byCategory?.[familyId];
+        if (!byFamily || typeof byFamily !== 'object') return null;
+        return {
+          info: byFamily.info && typeof byFamily.info === 'object' ? byFamily.info : {},
+          customer: byFamily.customer && typeof byFamily.customer === 'object' ? byFamily.customer : {},
+        };
+      };
+
+      const getFamilyGroupHidden = () => {
+        const byCategory = catalogConfig?.groupHiddenByCategoryFamily?.[category];
+        const byFamily = byCategory?.[familyId];
+        if (!byFamily || typeof byFamily !== 'object') return { info: [], customer: [] };
+        return {
+          info: Array.isArray(byFamily.info) ? byFamily.info : [],
+          customer: Array.isArray(byFamily.customer) ? byFamily.customer : [],
+        };
+      };
+
+      const applyFamilyOverrides = (baseGroups) => {
+        const overrides = getFamilyGroupOverrides();
+        const hidden = getFamilyGroupHidden();
+
+        const applyScope = (list, scope) => {
+          const hiddenSet = new Set((hidden?.[scope] || []).map((id) => String(id)));
+          const scopeOverrides = overrides?.[scope] || {};
+          const out = (Array.isArray(list) ? list : [])
+            .filter((g) => g && !hiddenSet.has(String(g.id)))
+            .map((g) => {
+              const ov = scopeOverrides[String(g.id)];
+              return ov && typeof ov === 'object' ? normalizeGroup({ ...g, ...ov }, scope) : normalizeGroup(g, scope);
+            });
+          // (Optional) If overrides define extra groups not in base, append them.
+          Object.keys(scopeOverrides || {}).forEach((id) => {
+            if (hiddenSet.has(String(id))) return;
+            if (out.some((g) => String(g.id) === String(id))) return;
+            const ov = scopeOverrides[id];
+            if (ov && typeof ov === 'object') out.push(normalizeGroup({ id, ...ov }, scope));
+          });
+          return out.filter(Boolean);
+        };
+
+        return {
+          info: applyScope(baseGroups?.info, 'info'),
+          customer: applyScope(baseGroups?.customer, 'customer'),
+        };
+      };
+
       const setValue = (k, v) => {
         setFormErrors([]);
         setSubmitStatus(null);
@@ -2605,20 +3001,404 @@
         }
       };
 
+      const deriveDefaultGroupConfig = (cat) => {
+        const cfg = SCHEMA[cat] || { must: [], also: [], optional: [] };
+        const fields = [...(cfg.must || []), ...(cfg.also || []), ...(cfg.optional || [])];
+        /** @type {{ info: any[], customer: any[] }} */
+        const result = { info: [], customer: [] };
+        fields.forEach((f) => {
+          if (!f || !f.key) return;
+          const base = {
+            id: f.key,
+            label: f.label,
+            schemaKey: f.key,
+            fieldType: f.type,
+            options: Array.isArray(f.options) ? f.options : [],
+          };
+          if (f.type === 'phoneModels') {
+            result.customer.push({
+              ...base,
+              key: 'Model',
+              mode: 'multi',
+              optionsSource: 'familyModels',
+            });
+            return;
+          }
+          if (f.type === 'multiselect') {
+            result.customer.push({
+              ...base,
+              key: normalizeGroupKey(f.label, f.key),
+              mode: 'multi',
+              optionsSource: 'static',
+            });
+            return;
+          }
+          result.info.push({
+            ...base,
+            mode: f.type === 'multiselect' ? 'multi' : 'single',
+            optionsSource: 'static',
+          });
+        });
+        return result;
+      };
+
+      const getStoredCategoryGroups = () => {
+        const stored = catalogConfig?.groupsByCategory?.[category];
+        if (stored && stored.info && stored.customer) return stored;
+        return null;
+      };
+
+      const categoryGroups = useMemo(() => {
+        const stored = getStoredCategoryGroups();
+        const base = normalizeGroupConfig(stored || deriveDefaultGroupConfig(category));
+        const merged = applyFamilyOverrides(base);
+        // Update the models label to match the selected family
+        const nextCustomer = (merged.customer || []).map((g) => {
+          if (g && g.key === 'Model') return { ...g, label: `${family?.name || 'Phone'} models` };
+          return g;
+        });
+        return { ...merged, customer: nextCustomer };
+      }, [catalogConfig, category, familyId]);
+
+      const persistCategoryGroups = async (nextGroups) => {
+        const nextConfig = mergeCatalogConfig(catalogConfig);
+        nextConfig.groupsByCategory = nextConfig.groupsByCategory || {};
+        nextConfig.groupsByCategory[category] = nextGroups;
+        await saveCatalogConfig(nextConfig);
+      };
+
+      const ensurePersistedGroups = async () => {
+        const stored = getStoredCategoryGroups();
+        if (stored) return stored;
+        const derived = deriveDefaultGroupConfig(category);
+        await persistCategoryGroups(derived);
+        return derived;
+      };
+
       // Reset defaults when category changes
       useEffect(()=>{
-        const cfg = SCHEMA[category] || { must: [], also: [], optional: [] };
         const def = {};
-        const defFrom = (fields) => fields.forEach(f=>{
-          if(f.type === 'select') def[f.key] = ""; // leave empty by default
-          if(f.type === 'number') def[f.key] = "";
-          if(f.type === 'text') def[f.key] = "";
-          if(f.type === 'checkbox') def[f.key] = false;
-          if(f.type === 'multiselect') def[f.key] = [];
+        (categoryGroups.info || []).forEach((g) => {
+          if (!g || !g.schemaKey) return;
+          if (g.fieldType === 'select') def[g.schemaKey] = '';
+          else if (g.fieldType === 'number') def[g.schemaKey] = '';
+          else if (g.fieldType === 'text') def[g.schemaKey] = '';
+          else if (g.fieldType === 'checkbox') def[g.schemaKey] = false;
+          else if (groupIsMulti(g)) def[g.schemaKey] = [];
+          else def[g.schemaKey] = '';
         });
-        defFrom(cfg.must); defFrom(cfg.also); defFrom(cfg.optional);
+        (categoryGroups.customer || []).forEach((g) => {
+          if (!g || !g.schemaKey) return;
+          if (groupIsMulti(g)) def[g.schemaKey] = [];
+          else def[g.schemaKey] = '';
+        });
         setForm(def);
-      }, [category]);
+      }, [category, categoryGroups]);
+
+      const [modalState, setModalState] = useState(null); // { type: 'group'|'category'|'family', scope?, groupId? }
+      const [groupDraft, setGroupDraft] = useState({
+        scope: 'info',
+        id: null,
+        label: '',
+        key: '',
+        mode: 'single',
+        fieldType: 'select',
+        optionsSource: 'static',
+        optionsText: '',
+      });
+      const [groupDraftError, setGroupDraftError] = useState('');
+      const [optionDraft, setOptionDraft] = useState('');
+      const [categoryDraft, setCategoryDraft] = useState('');
+      const [familyDraft, setFamilyDraft] = useState({ id: null, name: '', modelsText: '' });
+
+      const cloneJson = (value) => {
+        try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+      };
+
+      const slugifyId = (input) =>
+        String(input || '')
+          .toLowerCase()
+          .trim()
+          .replace(/[^a-z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '');
+
+      const updateCatalogConfig = async (updater) => {
+        const base = mergeCatalogConfig(catalogConfig);
+        const draft = cloneJson(base);
+        const next = (typeof updater === 'function' ? updater(draft) : draft) || draft;
+        await saveCatalogConfig(next);
+      };
+
+      const openManageFamilies = () => {
+        setFamilyDraft({ id: null, name: '', modelsText: '' });
+        setModalState({ type: 'family' });
+      };
+
+      const openManageCategories = () => {
+        setCategoryDraft('');
+        setModalState({ type: 'category' });
+      };
+
+      const addCategory = async () => {
+        const nextName = String(categoryDraft || '').trim();
+        if (!nextName) return;
+        await updateCatalogConfig((cfg) => {
+          const list = Array.isArray(cfg.categories) ? [...cfg.categories] : [];
+          if (!list.includes(nextName)) list.push(nextName);
+          cfg.categories = list;
+          return cfg;
+        });
+        setCategory(nextName);
+        setCategoryDraft('');
+        setModalState(null);
+      };
+
+      const removeCategory = async (name) => {
+        const target = String(name || '').trim();
+        if (!target) return;
+        if (!confirm(`Remove category "${target}"? Existing products will still keep their category text.`)) return;
+        await updateCatalogConfig((cfg) => {
+          cfg.categories = (Array.isArray(cfg.categories) ? cfg.categories : []).filter((c) => c !== target);
+          return cfg;
+        });
+      };
+
+      const startEditFamily = (fam) => {
+        const models = Array.isArray(fam?.models) ? fam.models : [];
+        setFamilyDraft({
+          id: fam?.id || null,
+          name: fam?.name || '',
+          modelsText: models.join('\n'),
+        });
+      };
+
+      const saveFamily = async () => {
+        const name = String(familyDraft.name || '').trim();
+        if (!name) return;
+        const models = String(familyDraft.modelsText || '')
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const uniqueModels = Array.from(new Set(models));
+        const editingId = familyDraft.id ? String(familyDraft.id) : null;
+        let id = editingId || slugifyId(name) || `family_${Date.now()}`;
+
+        await updateCatalogConfig((cfg) => {
+          const list = Array.isArray(cfg.families) ? [...cfg.families] : [];
+          if (!editingId) {
+            const base = id;
+            let i = 2;
+            while (list.some((f) => f && f.id === id)) {
+              id = `${base}_${i++}`;
+            }
+            list.push({ id, name, models: uniqueModels });
+          } else {
+            cfg.families = list.map((f) => (f && f.id === editingId ? { ...f, name, models: uniqueModels } : f));
+            return cfg;
+          }
+          cfg.families = list;
+          return cfg;
+        });
+
+        setFamilyId(id);
+        setFamilyDraft({ id: null, name: '', modelsText: '' });
+        setModalState(null);
+      };
+
+      const removeFamily = async (fam) => {
+        const id = String(fam?.id || '').trim();
+        const name = String(fam?.name || '').trim();
+        if (!id) return;
+        if (!confirm(`Remove family "${name || id}"? Existing products will still keep their family meta.`)) return;
+        await updateCatalogConfig((cfg) => {
+          cfg.families = (Array.isArray(cfg.families) ? cfg.families : []).filter((f) => f && f.id !== id);
+          return cfg;
+        });
+      };
+
+      const openAddGroup = async (scope) => {
+        await ensurePersistedGroups();
+        setGroupDraftError('');
+        setOptionDraft('');
+        setGroupDraft({
+          scope,
+          id: null,
+          label: '',
+          key: '',
+          mode: scope === 'customer' ? 'multi' : 'single',
+          fieldType: 'select',
+          optionsSource: scope === 'customer' ? 'static' : 'static',
+          optionsText: '',
+        });
+        setModalState({ type: 'group' });
+      };
+
+      const openEditGroup = async (scope, group) => {
+        await ensurePersistedGroups();
+        setGroupDraftError('');
+        setOptionDraft('');
+        const isLegacyCheckbox = scope === 'info' && group.fieldType === 'checkbox';
+        const inferredOptionsText = isLegacyCheckbox
+          ? 'Yes\nNo'
+          : (Array.isArray(group.options) ? group.options : []).join('\n');
+        setGroupDraft({
+          scope,
+          id: group.id,
+          label: group.label || '',
+          key: group.key || '',
+          mode: isLegacyCheckbox ? 'single' : (modeIsMulti(group.mode) ? 'multi' : 'single'),
+          fieldType: 'select',
+          optionsSource: group.optionsSource || 'static',
+          optionsText: inferredOptionsText,
+        });
+        setModalState({ type: 'group' });
+      };
+
+      const parseOptionsText = (text) =>
+        Array.from(new Set(
+          String(text || '')
+            .split(/[,;\n]/g)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        ));
+
+      const setDraftOptions = (list) => {
+        const unique = Array.from(new Set((Array.isArray(list) ? list : []).map((s) => String(s).trim()).filter(Boolean)));
+        setGroupDraft((p) => ({ ...p, optionsText: unique.join('\n') }));
+      };
+
+      const addDraftOptions = () => {};
+      const removeDraftOption = () => {};
+
+      const removeGroup = async (scope, group) => {
+        await ensurePersistedGroups();
+        const groupId = String(group?.id || '').trim();
+        if (!groupId) return;
+
+        // Hide only for this category + family (does not affect other families).
+        await updateCatalogConfig((cfg) => {
+          cfg.groupHiddenByCategoryFamily = cfg.groupHiddenByCategoryFamily && typeof cfg.groupHiddenByCategoryFamily === 'object'
+            ? cfg.groupHiddenByCategoryFamily
+            : {};
+          cfg.groupOverridesByCategoryFamily = cfg.groupOverridesByCategoryFamily && typeof cfg.groupOverridesByCategoryFamily === 'object'
+            ? cfg.groupOverridesByCategoryFamily
+            : {};
+
+          cfg.groupHiddenByCategoryFamily[category] = cfg.groupHiddenByCategoryFamily[category] || {};
+          cfg.groupHiddenByCategoryFamily[category][familyId] = cfg.groupHiddenByCategoryFamily[category][familyId] || { info: [], customer: [] };
+          const hiddenScope = scope === 'customer' ? 'customer' : 'info';
+          const list = Array.isArray(cfg.groupHiddenByCategoryFamily[category][familyId][hiddenScope])
+            ? cfg.groupHiddenByCategoryFamily[category][familyId][hiddenScope]
+            : [];
+          if (!list.includes(groupId)) list.push(groupId);
+          cfg.groupHiddenByCategoryFamily[category][familyId][hiddenScope] = list;
+
+          // If there is a local override for this group, remove it as well.
+          cfg.groupOverridesByCategoryFamily[category] = cfg.groupOverridesByCategoryFamily[category] || {};
+          cfg.groupOverridesByCategoryFamily[category][familyId] = cfg.groupOverridesByCategoryFamily[category][familyId] || { info: {}, customer: {} };
+          const ovScope = cfg.groupOverridesByCategoryFamily[category][familyId][hiddenScope];
+          if (ovScope && typeof ovScope === 'object') {
+            delete ovScope[groupId];
+          }
+          return cfg;
+        });
+
+        setForm((prev) => {
+          const copy = { ...prev };
+          const valueKey = group.schemaKey || group.id;
+          delete copy[valueKey];
+          return copy;
+        });
+      };
+
+      const saveGroup = async () => {
+        const base = await ensurePersistedGroups();
+        const scope = groupDraft.scope;
+        const label = String(groupDraft.label || '').trim();
+        if (!label) {
+          setGroupDraftError('Group name is required.');
+          return;
+        }
+        const mode = groupDraft.mode === 'multi' ? 'multi' : 'single';
+        const optionsSource = groupDraft.optionsSource === 'familyModels' ? 'familyModels' : 'static';
+        const options = optionsSource === 'familyModels' ? [] : parseOptionsText(groupDraft.optionsText);
+        if (scope === 'info' && optionsSource !== 'familyModels' && options.length === 0) {
+          setGroupDraftError('Add at least one option (comma or new line).');
+          return;
+        }
+        const isNew = !groupDraft.id;
+        const id = groupDraft.id || `og_${Date.now()}`;
+        const schemaKey = isNew ? id : (base[scope] || []).find((g) => String(g.id) === String(id))?.schemaKey;
+        const nextGroup = {
+          id,
+          label,
+          schemaKey: schemaKey || id,
+          fieldType: 'select',
+          options,
+          optionsSource,
+          mode,
+        };
+        if (scope === 'customer') {
+          const prevKey = !isNew ? (base.customer || []).find((g) => g && String(g.id) === String(id))?.key : '';
+          nextGroup.key = String(prevKey || '').trim() || normalizeGroupKey(label, id);
+        }
+
+        if (isNew) {
+          // Adding a group updates the shared category template, so it appears in all families.
+          const list = scope === 'customer' ? (base.customer || []) : (base.info || []);
+          const updated = [...list, nextGroup];
+
+          if (scope === 'customer' && mode === 'multi') {
+            const multiCount = updated.filter((g) => modeIsMulti(g?.mode)).length;
+            if (multiCount > 2) {
+              setGroupDraftError('Only 2 customer option groups can be MULTI. Change another group to SINGLE first.');
+              return;
+            }
+          }
+
+          const nextBase = scope === 'customer'
+            ? { ...base, customer: updated }
+            : { ...base, info: updated };
+          await persistCategoryGroups(nextBase);
+        } else {
+          // Editing an existing group only affects this category + family.
+          if (scope === 'customer' && mode === 'multi') {
+            const current = Array.isArray(categoryGroups.customer) ? categoryGroups.customer : [];
+            const updated = current.map((g) => (String(g.id) === String(id) ? { ...g, ...nextGroup } : g));
+            const multiCount = updated.filter((g) => modeIsMulti(g?.mode)).length;
+            if (multiCount > 2) {
+              setGroupDraftError('Only 2 customer option groups can be MULTI. Change another group to SINGLE first.');
+              return;
+            }
+          }
+
+          await updateCatalogConfig((cfg) => {
+            cfg.groupOverridesByCategoryFamily = cfg.groupOverridesByCategoryFamily && typeof cfg.groupOverridesByCategoryFamily === 'object'
+              ? cfg.groupOverridesByCategoryFamily
+              : {};
+            cfg.groupHiddenByCategoryFamily = cfg.groupHiddenByCategoryFamily && typeof cfg.groupHiddenByCategoryFamily === 'object'
+              ? cfg.groupHiddenByCategoryFamily
+              : {};
+
+            cfg.groupOverridesByCategoryFamily[category] = cfg.groupOverridesByCategoryFamily[category] || {};
+            cfg.groupOverridesByCategoryFamily[category][familyId] = cfg.groupOverridesByCategoryFamily[category][familyId] || { info: {}, customer: {} };
+            const scopeKey = scope === 'customer' ? 'customer' : 'info';
+            cfg.groupOverridesByCategoryFamily[category][familyId][scopeKey] = cfg.groupOverridesByCategoryFamily[category][familyId][scopeKey] || {};
+            cfg.groupOverridesByCategoryFamily[category][familyId][scopeKey][String(id)] = nextGroup;
+
+            // Ensure this group is not hidden for this family after saving.
+            cfg.groupHiddenByCategoryFamily[category] = cfg.groupHiddenByCategoryFamily[category] || {};
+            cfg.groupHiddenByCategoryFamily[category][familyId] = cfg.groupHiddenByCategoryFamily[category][familyId] || { info: [], customer: [] };
+            const hiddenList = Array.isArray(cfg.groupHiddenByCategoryFamily[category][familyId][scopeKey])
+              ? cfg.groupHiddenByCategoryFamily[category][familyId][scopeKey]
+              : [];
+            cfg.groupHiddenByCategoryFamily[category][familyId][scopeKey] = hiddenList.filter((x) => String(x) !== String(id));
+
+            return cfg;
+          });
+        }
+        setModalState(null);
+      };
 
       // Field renderer
       const Field = ({ f }) => {
@@ -2645,31 +3425,164 @@
           );
         }
         if (f.type === 'phoneModels') {
-          const brandKey = `${f.key}Brand`;
-          const brand = form[brandKey] || (f.allowedBrands ? f.allowedBrands[0] : 'iPhone');
-          const models = BRAND_MODELS[brand] || [];
+          const models = familyModels;
           const current = Array.isArray(form[f.key]) ? form[f.key] : [];
-          const setBrand = (b) => {
-            setValue(brandKey, b);
-            setValue(f.key, []);
-          };
           return React.createElement('div', { className: 'space-y-3 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
-            React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-xs' },
-              (f.allowedBrands || PHONE_BRANDS).map(b => React.createElement('button', { type: 'button', key: b, onClick: ()=> setBrand(b), className: cx('rounded-full border px-2.5 py-1 font-medium transition', (form[`${f.key}Brand`]|| (f.allowedBrands ? f.allowedBrands[0] : 'iPhone'))===b ? 'border-transparent bg-brand text-white shadow-sm' : 'border-[var(--surface-border)] bg-white/80 text-slate-700 hover:text-slate-900 hover:bg-white') }, b))
-            ),
             React.createElement('div', { className: 'flex items-center justify-between text-xs text-slate-500' },
-              React.createElement('span', { className: 'font-semibold text-slate-800' }, `${brand} models`),
+              React.createElement('span', { className: 'font-semibold text-slate-800' }, `${family?.name || 'Phone'} models`),
               React.createElement('div', { className: 'flex items-center gap-2' },
                 React.createElement('button', { type: 'button', onClick: ()=> setValue(f.key, models), className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium hover:bg-white/60', title: 'Select all' }, 'All'),
                 React.createElement('button', { type: 'button', onClick: ()=> setValue(f.key, []), className: 'rounded-full border border-[var(--surface-border)] px-2 py-0.5 font-medium hover:bg-white/60', title: 'Clear' }, 'Clear')
               )
             ),
             React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-xs' },
-              models.map(m => { const on = current.includes(m); return React.createElement('button', { type: 'button', key: m, onClick: ()=> { const arr = Array.isArray(form[f.key]) ? form[f.key] : []; setValue(f.key, on ? arr.filter(x=>x!==m) : [...arr, m]); }, className: cx('rounded-full border px-2.5 py-1 font-medium transition', on? 'border-transparent bg-brand text-white shadow-sm' : 'border-[var(--surface-border)] bg-white/80 text-slate-700 hover:text-slate-900 hover:bg-white') }, m); })
+              models.map(m => {
+                const on = current.includes(m);
+                const shortLabel = String(m).startsWith('iPhone ') ? String(m).replace('iPhone ', '') : m;
+                return React.createElement('button', {
+                  type: 'button',
+                  key: m,
+                  onClick: ()=> {
+                    const arr = Array.isArray(form[f.key]) ? form[f.key] : [];
+                    setValue(f.key, on ? arr.filter(x=>x!==m) : [...arr, m]);
+                  },
+                  className: cx(
+                    'rounded-full border px-2.5 py-1 font-medium transition',
+                    on? 'border-transparent bg-brand text-white shadow-sm' : 'border-[var(--surface-border)] bg-white/80 text-slate-700 hover:text-slate-900 hover:bg-white'
+                  )
+                }, shortLabel);
+              })
             )
           );
         }
         return null;
+      };
+
+      const getGroupValueKey = (group) => group.schemaKey || group.id;
+
+      const getGroupOptions = (group) => {
+        if (!group) return [];
+        if (group.optionsSource === 'familyModels') return familyModels;
+        return Array.isArray(group.options) ? group.options : [];
+      };
+
+      const customerVariants = useMemo(() => {
+        const variantsObj = {};
+        (categoryGroups.customer || []).forEach((g) => {
+          if (!g) return;
+          const key = g.key || normalizeGroupKey(g.label, g.schemaKey || g.id);
+          const valueKey = getGroupValueKey(g);
+          const raw = form[valueKey];
+          if (groupIsMulti(g)) {
+            const list = Array.isArray(raw) ? raw : (raw == null ? [] : [raw]);
+            const cleaned = list.map((v) => String(v).trim()).filter(Boolean);
+            if (cleaned.length) variantsObj[key] = Array.from(new Set(cleaned));
+            return;
+          }
+          const single = Array.isArray(raw) ? raw[0] : raw;
+          const v = String(single || '').trim();
+          if (v) variantsObj[key] = [v];
+        });
+        return variantsObj;
+      }, [categoryGroups, form]);
+
+      const stockCombos = useMemo(() => {
+        const combos = computeVariantCombos(customerVariants);
+        return combos.slice().sort((a, b) => a.key.localeCompare(b.key));
+      }, [customerVariants]);
+
+      const stockComboKeys = useMemo(() => stockCombos.map((c) => c.key), [stockCombos]);
+
+      useEffect(() => {
+        if (!inventoryEnabled) return;
+        setInventoryDraft((prev) => {
+          const next = {};
+          stockComboKeys.forEach((key) => {
+            next[key] = Object.prototype.hasOwnProperty.call(prev, key) ? prev[key] : '';
+          });
+          const prevKeys = Object.keys(prev);
+          if (
+            prevKeys.length === stockComboKeys.length &&
+            prevKeys.every((key) => Object.prototype.hasOwnProperty.call(next, key) && next[key] === prev[key])
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }, [inventoryEnabled, stockComboKeys]);
+
+      useEffect(() => {
+        if (!priceOverridesEnabled) return;
+        setPriceOverridesDraft((prev) => {
+          const next = {};
+          stockComboKeys.forEach((key) => {
+            next[key] = Object.prototype.hasOwnProperty.call(prev, key) ? prev[key] : '';
+          });
+          const prevKeys = Object.keys(prev);
+          if (
+            prevKeys.length === stockComboKeys.length &&
+            prevKeys.every((key) => Object.prototype.hasOwnProperty.call(next, key) && next[key] === prev[key])
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }, [priceOverridesEnabled, stockComboKeys]);
+
+      const applyInventoryDefaultToAll = () => {
+        const numeric = Number(inventoryDefault);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(Math.floor(numeric));
+        setInventoryDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = value;
+          });
+          return next;
+        });
+      };
+
+      const clearInventoryAll = () => {
+        setInventoryDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = '';
+          });
+          return next;
+        });
+        setInventoryDefault('');
+      };
+
+      const applyBasePriceToAll = () => {
+        const numeric = Number(price);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(numeric);
+        setPriceOverridesDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            if (key === INVENTORY_BASE_KEY) return;
+            next[key] = value;
+          });
+          return next;
+        });
+      };
+
+      const clearPriceOverridesAll = () => {
+        setPriceOverridesDraft((prev) => {
+          const next = { ...prev };
+          stockComboKeys.forEach((key) => {
+            next[key] = '';
+          });
+          return next;
+        });
+      };
+
+      const formatStockComboLabel = (selection) => {
+        const entries = Object.entries(selection || {})
+          .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (!entries.length) return 'Base product';
+        return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
       };
 
       // Build product
@@ -2677,36 +3590,61 @@
         const cfg = SCHEMA[category] || { must: [], also: [], optional: [], name: null, specs: null };
         const autoName = (cfg.name && cfg.name(form)) || `${category} item`;
         const finalName = name.trim() || autoName;
-        const variantsObj = {};
-        const normalizeLabel = (label, key) => {
-          if (key === 'models') return 'Model';
-          const lower = String(label).toLowerCase().trim();
-          if (lower === 'color' || lower === 'colors' || lower === 'colour') return 'Color';
-          return label.trim();
-        };
-        const push = (label, key, val) => {
-          if (val == null || val === '' || (Array.isArray(val) && val.length === 0)) return;
-          const lbl = normalizeLabel(label, key);
-          variantsObj[lbl] = Array.isArray(val) ? val : [String(val)];
-        };
-        [...(cfg.must||[]), ...(cfg.also||[]), ...(cfg.optional||[])].forEach(f => {
-          const val = form[f.key];
-          if (f.type === 'checkbox') {
-            if (val) push(f.label, f.key, 'Yes');
-          } else {
-            push(f.label, f.key, val);
+        const variantsObj = { ...(customerVariants || {}) };
+
+        const inventoryObj = {};
+        if (inventoryEnabled) {
+          Object.entries(inventoryDraft || {}).forEach(([key, raw]) => {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            inventoryObj[(key && key.trim()) || INVENTORY_BASE_KEY] = Math.floor(numeric);
+          });
+        }
+
+        if (priceOverridesEnabled) {
+          const basePrice = Number(price);
+          const baseNumeric = Number.isFinite(basePrice) ? basePrice : 0;
+          const priceMap = {};
+          Object.entries(priceOverridesDraft || {}).forEach(([key, raw]) => {
+            if (key === INVENTORY_BASE_KEY) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            if (Math.abs(numeric - baseNumeric) < 1e-9) return;
+            priceMap[(key && key.trim()) || INVENTORY_BASE_KEY] = numeric;
+          });
+          if (Object.keys(priceMap).length) {
+            variantsObj[PRICE_OVERRIDE_VARIANTS_KEY] = priceMap;
           }
-        });
-        if (form['modelsBrand']) push('Phone', 'modelsBrand', form['modelsBrand']);
-        Object.keys(variantsObj).forEach(key => {
-          const list = Array.isArray(variantsObj[key]) ? variantsObj[key].map(v => String(v).trim()).filter(Boolean) : [];
-          if (!list.length) {
-            delete variantsObj[key];
-          } else {
-            variantsObj[key] = Array.from(new Set(list));
+        }
+
+        const extraSpecs = [];
+        (categoryGroups.info || []).forEach((g) => {
+          if (!g) return;
+          const valueKey = getGroupValueKey(g);
+          const label = String(g.label || g.key || g.id || '').trim();
+          if (g.fieldType === 'checkbox') {
+            if (form[valueKey]) extraSpecs.push(label || g.label);
+            return;
           }
+          if (groupIsMulti(g)) {
+            const list = Array.isArray(form[valueKey])
+              ? form[valueKey].map((v) => String(v).trim()).filter(Boolean)
+              : [];
+            if (!list.length) return;
+            extraSpecs.push(label ? `${label}: ${list.join(', ')}` : list.join(', '));
+            return;
+          }
+          const v = String(form[valueKey] || '').trim();
+          if (v) extraSpecs.push(label ? `${label}: ${v}` : v);
         });
-        const specs = ((cfg.specs && cfg.specs(form)) || []).filter(Boolean).slice(0,6);
+
+        const familyName = String(family?.name || '').trim();
+        const metaSpecs = familyName ? [`${META_FAMILY_PREFIX}${familyName}`] : [];
+        const specs = [...metaSpecs, ...Array.from(new Set(extraSpecs)).filter(Boolean)];
         const uniqueImages = Array.from(new Set((imagesData || []).filter(Boolean)));
         const product = {
           id: `owner-${Date.now()}`,
@@ -2718,7 +3656,8 @@
           image: uniqueImages[0] || undefined,
           images: uniqueImages.length ? uniqueImages : undefined,
           specs,
-          variants: variantsObj
+          variants: variantsObj,
+          inventory: inventoryEnabled ? inventoryObj : undefined
         };
         return normalizeProductRow(product);
       };
@@ -2731,11 +3670,16 @@
           errors.push('Price must be greater than 0');
         }
 
-        const phoneModelsField = (cfg.must || []).find(f => f.type === 'phoneModels');
-        if (phoneModelsField) {
-          const models = form[phoneModelsField.key];
-          if (!Array.isArray(models) || models.length === 0) {
-            errors.push('Please select at least one model');
+        const modelGroup = (categoryGroups.customer || []).find((g) => g && (g.key === 'Model' || g.schemaKey === 'models'));
+        if (modelGroup) {
+          const valueKey = getGroupValueKey(modelGroup);
+          const models = form[valueKey];
+          if (groupIsMulti(modelGroup)) {
+            const list = Array.isArray(models) ? models : [];
+            if (list.length === 0) errors.push('Please select at least one model');
+          } else {
+            const single = String(models || '').trim();
+            if (!single) errors.push('Please select a model');
           }
         }
 
@@ -2745,6 +3689,27 @@
           if (!val) {
             errors.push('Model is required');
           }
+        }
+
+        if (inventoryEnabled) {
+          const invalid = Object.entries(inventoryDraft || {}).find(([_, raw]) => {
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return false;
+            const numeric = Number(trimmed);
+            return !Number.isFinite(numeric) || numeric < 0;
+          });
+          if (invalid) errors.push('Stock quantities must be 0 or greater (or leave blank for unlimited).');
+        }
+
+        if (priceOverridesEnabled) {
+          const invalid = Object.entries(priceOverridesDraft || {}).find(([key, raw]) => {
+            if (key === INVENTORY_BASE_KEY) return false;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return false;
+            const numeric = Number(trimmed);
+            return !Number.isFinite(numeric) || numeric < 0;
+          });
+          if (invalid) errors.push('Price overrides must be 0 or greater (or leave blank to use the base price).');
         }
 
         return errors;
@@ -2776,6 +3741,11 @@
           setDescription('');
           setImagesData([]);
           setForm({});
+          setInventoryEnabled(false);
+          setInventoryDefault('');
+          setInventoryDraft({});
+          setPriceOverridesEnabled(false);
+          setPriceOverridesDraft({});
         } catch (error) {
           console.error('Failed to add product:', error);
           setSubmitStatus({ type: 'error', message: 'Could not save product. Check your connection and try again.' });
@@ -2784,8 +3754,6 @@
           setSubmitting(false);
         }
       };
-
-      const cfg = SCHEMA[category] || { must: [], also: [], optional: [] };
 
       return React.createElement(
         'section',
@@ -2816,9 +3784,25 @@
             React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Essentials'),
             React.createElement('div', { className: 'grid grid-cols-1 gap-4 md:grid-cols-2' },
               React.createElement('label', { className: 'block text-sm text-slate-600' },
-                React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Category'),
+                React.createElement('div', { className: 'mb-1 flex items-center justify-between gap-2' },
+                  React.createElement('span', { className: 'block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Family'),
+                  React.createElement('button', { type: 'button', onClick: openManageFamilies, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Manage')
+                ),
+                React.createElement('select', {
+                  value: familyId,
+                  onChange: (e)=> { setFormErrors([]); setSubmitStatus(null); setFamilyId(e.target.value); },
+                  className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                },
+                  (families || []).map(f => React.createElement('option', { key: f.id, value: f.id }, f.name))
+                )
+              ),
+              React.createElement('label', { className: 'block text-sm text-slate-600' },
+                React.createElement('div', { className: 'mb-1 flex items-center justify-between gap-2' },
+                  React.createElement('span', { className: 'block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Category'),
+                  React.createElement('button', { type: 'button', onClick: openManageCategories, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Manage')
+                ),
                 React.createElement('select', { value: category, onChange: (e)=> { setFormErrors([]); setSubmitStatus(null); setCategory(e.target.value); }, className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' },
-                  CATEGORIES.filter(c => c !== 'All').map(c => React.createElement('option', { key: c, value: c }, c))
+                  categories.map(c => React.createElement('option', { key: c, value: c }, c))
                 )
               ),
               React.createElement('label', { className: 'block text-sm text-slate-600' },
@@ -2851,9 +3835,144 @@
           ),
 
           React.createElement('div', { className: 'space-y-3' },
-            React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Variants & Specs'),
+            React.createElement('div', { className: 'flex items-center justify-between' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Product information'),
+              React.createElement('button', { type: 'button', onClick: ()=> openAddGroup('info'), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Add option group')
+            ),
             React.createElement('div', { className: 'grid gap-3 md:grid-cols-2' },
-              [...(cfg.must||[]), ...(cfg.also||[]), ...(cfg.optional||[])].map(f => React.createElement(Field, { key: f.key, f }))
+              (categoryGroups.info || []).map((g) => {
+                const valueKey = getGroupValueKey(g);
+                return React.createElement(OwnerInfoDropdown, {
+                  key: g.id,
+                  label: g.label,
+                  mode: g.mode,
+                  fieldType: g.fieldType,
+                  options: getGroupOptions(g),
+                  value: form[valueKey],
+                  onChange: (next) => setValue(valueKey, next),
+                  onEdit: () => openEditGroup('info', g),
+                  onRemove: () => removeGroup('info', g),
+                });
+              })
+            )
+          ),
+
+          React.createElement('div', { className: 'space-y-3' },
+            React.createElement('div', { className: 'flex items-center justify-between' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Customer options'),
+              React.createElement('button', { type: 'button', onClick: ()=> openAddGroup('customer'), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Add option group')
+            ),
+            React.createElement('div', { className: 'grid gap-3 md:grid-cols-2' },
+              (categoryGroups.customer || []).map((g) => {
+                const valueKey = getGroupValueKey(g);
+                return React.createElement(OwnerCustomerChips, {
+                  key: g.id,
+                  label: g.label,
+                  mode: g.mode,
+                  options: getGroupOptions(g),
+                  value: form[valueKey],
+                  onChange: (next) => setValue(valueKey, next),
+                  onEdit: () => openEditGroup('customer', g),
+                  onRemove: () => removeGroup('customer', g),
+                });
+              })
+            )
+          ),
+
+          React.createElement('div', { className: 'space-y-3' },
+            React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Variant prices (optional)'),
+              React.createElement('label', { className: 'inline-flex items-center gap-2 rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur' },
+                React.createElement('input', {
+                  type: 'checkbox',
+                  checked: priceOverridesEnabled,
+                  onChange: (e) => setPriceOverridesEnabled(e.target.checked),
+                  className: 'h-4 w-4 rounded border-[var(--surface-border)] text-brand focus:ring-brand'
+                }),
+                'Override prices'
+              )
+            ),
+            React.createElement('p', { className: 'text-sm text-slate-600' }, 'Optional. Leave blank to use the base price for a selection.'),
+            priceOverridesEnabled && React.createElement('div', { className: 'space-y-3 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
+              React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-2' },
+                React.createElement('div', { className: 'text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, `Base price: ${price ? fmt(Number(price) || 0) : '—'}`),
+                React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                  React.createElement('button', { type: 'button', onClick: applyBasePriceToAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Copy base to all'),
+                  React.createElement('button', { type: 'button', onClick: clearPriceOverridesAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Clear all')
+                )
+              ),
+              React.createElement('div', { className: 'max-h-72 space-y-2 overflow-y-auto pr-1' },
+                stockCombos
+                  .filter(({ key }) => key !== INVENTORY_BASE_KEY)
+                  .map(({ key, selection }) =>
+                    React.createElement('label', { key, className: 'flex items-center justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner' },
+                      React.createElement('span', { className: 'flex-1 text-xs font-semibold text-slate-700' }, formatStockComboLabel(selection)),
+                      React.createElement('input', {
+                        type: 'number',
+                        min: 0,
+                        step: '0.01',
+                        inputMode: 'decimal',
+                        value: priceOverridesDraft[key] ?? '',
+                        onChange: (e) => setPriceOverridesDraft((prev) => ({ ...prev, [key]: e.target.value })),
+                        placeholder: 'Default',
+                        className: 'w-32 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3 py-2 text-right text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                      })
+                    )
+                  )
+              )
+            )
+          ),
+
+          React.createElement('div', { className: 'space-y-3' },
+            React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3' },
+              React.createElement('h3', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-slate-500' }, 'Stock limits (optional)'),
+              React.createElement('label', { className: 'inline-flex items-center gap-2 rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur' },
+                React.createElement('input', {
+                  type: 'checkbox',
+                  checked: inventoryEnabled,
+                  onChange: (e) => setInventoryEnabled(e.target.checked),
+                  className: 'h-4 w-4 rounded border-[var(--surface-border)] text-brand focus:ring-brand'
+                }),
+                'Limit stock'
+              )
+            ),
+            React.createElement('p', { className: 'text-sm text-slate-600' }, 'Optional. Leave blank to keep a variant unlimited.'),
+            inventoryEnabled && React.createElement('div', { className: 'space-y-3 rounded-2xl border border-[var(--surface-border)] bg-white/70 p-4 text-sm text-slate-600 shadow-sm backdrop-blur' },
+              React.createElement('div', { className: 'flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between' },
+                React.createElement('label', { className: 'block flex-1 text-sm text-slate-600' },
+                  React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Default quantity'),
+                  React.createElement('input', {
+                    type: 'number',
+                    min: 0,
+                    step: '1',
+                    value: inventoryDefault,
+                    onChange: (e) => setInventoryDefault(e.target.value),
+                    placeholder: 'e.g. 10',
+                    className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                  })
+                ),
+                React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                  React.createElement('button', { type: 'button', onClick: applyInventoryDefaultToAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Apply to all'),
+                  React.createElement('button', { type: 'button', onClick: clearInventoryAll, className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Clear all')
+                )
+              ),
+              React.createElement('div', { className: 'max-h-72 space-y-2 overflow-y-auto pr-1' },
+                stockCombos.map(({ key, selection }) =>
+                  React.createElement('label', { key, className: 'flex items-center justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner' },
+                    React.createElement('span', { className: 'flex-1 text-xs font-semibold text-slate-700' }, formatStockComboLabel(selection)),
+                    React.createElement('input', {
+                      type: 'number',
+                      min: 0,
+                      step: '1',
+                      inputMode: 'numeric',
+                      value: inventoryDraft[key] ?? '',
+                      onChange: (e) => setInventoryDraft((prev) => ({ ...prev, [key]: e.target.value })),
+                      placeholder: 'Unlimited',
+                      className: 'w-32 rounded-2xl border border-[var(--surface-border)] bg-white/80 px-3 py-2 text-right text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                    })
+                  )
+                )
+              )
             )
           ),
 
@@ -2868,6 +3987,118 @@
               )
             }, submitting ? 'Saving...' : 'Add Product'),
             React.createElement('button', { type: 'button', onClick: ()=> window.__setOwnerManage?.(true), className: 'inline-flex items-center justify-center rounded-full border border-[var(--surface-border)] bg-white/70 px-6 py-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' }, 'Manage catalogue')
+          ),
+
+          React.createElement(OwnerModalShell, {
+            open: modalState?.type === 'group',
+            title: groupDraft.id ? 'Edit option group' : 'Add option group',
+            onClose: () => setModalState(null),
+            actions: React.createElement(React.Fragment, null,
+              React.createElement('button', { type: 'button', onClick: () => setModalState(null), className: 'rounded-full border border-[var(--surface-border)] bg-white px-4 py-2 text-sm font-semibold text-slate-700' }, 'Cancel'),
+              React.createElement('button', { type: 'button', onClick: saveGroup, className: 'rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white' }, 'Save')
+            )
+          },
+            groupDraftError && React.createElement('div', { className: 'rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700' }, groupDraftError),
+            React.createElement('label', { className: 'block text-sm text-slate-600' },
+              React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Group name'),
+              React.createElement('input', { value: groupDraft.label, onChange: (e) => setGroupDraft((p) => ({ ...p, label: e.target.value })), className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' })
+            ),
+            React.createElement('div', { className: 'grid grid-cols-1 gap-3 sm:grid-cols-2' },
+              React.createElement('label', { className: 'block text-sm text-slate-600' },
+                React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Selection'),
+                React.createElement('select', {
+                  value: groupDraft.mode,
+                  onChange: (e) => setGroupDraft((p) => ({ ...p, mode: e.target.value })),
+                  className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand'
+                },
+                  React.createElement('option', { value: 'single' }, 'Single'),
+                  React.createElement('option', { value: 'multi' }, 'Multi')
+                )
+              ),
+              React.createElement('label', { className: 'block text-sm text-slate-600' },
+                React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Options source'),
+                React.createElement('select', { value: groupDraft.optionsSource, onChange: (e) => setGroupDraft((p) => ({ ...p, optionsSource: e.target.value })), className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' },
+                  React.createElement('option', { value: 'static' }, 'Custom list'),
+                  groupDraft.scope === 'customer' && React.createElement('option', { value: 'familyModels' }, 'Use family models')
+                )
+              )
+            ),
+            groupDraft.optionsSource !== 'familyModels' && React.createElement('label', { className: 'block text-sm text-slate-600' },
+              React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Options (comma or new line)'),
+              React.createElement('textarea', {
+                rows: 6,
+                value: groupDraft.optionsText,
+                onChange: (e) => setGroupDraft((p) => ({ ...p, optionsText: e.target.value })),
+                className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                placeholder: 'Option 1, Option 2, Option 3\\nOption 4'
+              })
+            )
+          )
+          ,
+          React.createElement(OwnerModalShell, {
+            open: modalState?.type === 'category',
+            title: 'Manage categories',
+            onClose: () => setModalState(null),
+            actions: React.createElement('button', { type: 'button', onClick: () => setModalState(null), className: 'rounded-full border border-[var(--surface-border)] bg-white px-4 py-2 text-sm font-semibold text-slate-700' }, 'Close')
+          },
+            React.createElement('div', { className: 'space-y-3' },
+              React.createElement('div', { className: 'flex flex-wrap items-end gap-2' },
+                React.createElement('label', { className: 'flex-1 block text-sm text-slate-600' },
+                  React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'New category'),
+                  React.createElement('input', { value: categoryDraft, onChange: (e) => setCategoryDraft(e.target.value), placeholder: 'e.g. Camera parts', className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' })
+                ),
+                React.createElement('button', { type: 'button', onClick: addCategory, className: 'rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white' }, 'Add')
+              ),
+              React.createElement('div', { className: 'space-y-2' },
+                (categories || []).map((c) =>
+                  React.createElement('div', { key: c, className: 'flex items-center justify-between gap-2 rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm text-slate-700' },
+                    React.createElement('button', { type: 'button', onClick: () => { setCategory(c); setModalState(null); }, className: cx('flex-1 text-left font-medium', c === category ? 'text-slate-900' : 'text-slate-700') }, c),
+                    React.createElement('button', { type: 'button', onClick: () => removeCategory(c), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white', 'aria-label': `Remove category ${c}` }, '×')
+                  )
+                )
+              )
+            )
+          )
+          ,
+          React.createElement(OwnerModalShell, {
+            open: modalState?.type === 'family',
+            title: 'Manage families',
+            onClose: () => setModalState(null),
+            actions: React.createElement('button', { type: 'button', onClick: () => setModalState(null), className: 'rounded-full border border-[var(--surface-border)] bg-white px-4 py-2 text-sm font-semibold text-slate-700' }, 'Close')
+          },
+            React.createElement('div', { className: 'space-y-3' },
+              React.createElement('div', { className: 'space-y-2' },
+                React.createElement('p', { className: 'text-sm text-slate-600' }, 'Families control which model list appears in the phone model picker.'),
+                React.createElement('div', { className: 'space-y-2' },
+                  (families || []).map((f) =>
+                    React.createElement('div', { key: f.id, className: 'flex items-center justify-between gap-2 rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3 py-2 text-sm text-slate-700' },
+                      React.createElement('button', { type: 'button', onClick: () => { setFamilyId(f.id); setModalState(null); }, className: cx('flex-1 text-left font-medium', f.id === familyId ? 'text-slate-900' : 'text-slate-700') }, f.name),
+                      React.createElement('button', { type: 'button', onClick: () => startEditFamily(f), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white' }, 'Edit'),
+                      React.createElement('button', { type: 'button', onClick: () => removeFamily(f), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white', 'aria-label': `Remove family ${f.name}` }, '×')
+                    )
+                  )
+                )
+              ),
+              React.createElement('div', { className: 'rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3 shadow-sm' },
+                React.createElement('div', { className: 'flex items-center justify-between' },
+                  React.createElement('h4', { className: 'text-sm font-semibold text-slate-900' }, familyDraft.id ? 'Edit family' : 'Add family'),
+                  familyDraft.id && React.createElement('button', { type: 'button', onClick: () => setFamilyDraft({ id: null, name: '', modelsText: '' }), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white' }, 'New')
+                ),
+                React.createElement('div', { className: 'mt-3 space-y-3' },
+                  React.createElement('label', { className: 'block text-sm text-slate-600' },
+                    React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Family name'),
+                    React.createElement('input', { value: familyDraft.name, onChange: (e) => setFamilyDraft((p) => ({ ...p, name: e.target.value })), placeholder: 'e.g. Samsung S', className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' })
+                  ),
+                  React.createElement('label', { className: 'block text-sm text-slate-600' },
+                    React.createElement('span', { className: 'mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Models (one per line)'),
+                    React.createElement('textarea', { rows: 6, value: familyDraft.modelsText, onChange: (e) => setFamilyDraft((p) => ({ ...p, modelsText: e.target.value })), placeholder: 'iPhone 11\\niPhone 12\\n...', className: 'w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand' })
+                  ),
+                  React.createElement('div', { className: 'flex justify-end' },
+                    React.createElement('button', { type: 'button', onClick: saveFamily, className: 'rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white' }, familyDraft.id ? 'Save changes' : 'Add family')
+                  )
+                )
+              )
+            )
           )
         )
       );
@@ -2902,14 +4133,53 @@
       );
     }
 
-    function OwnerProductModal({ open, onClose, product, onSave, onHide, onDelete }) {
+    function OwnerProductModal({ open, onClose, product, catalogConfig, onSave, onHide, onDelete }) {
       const ref = useRef(null);
       useFocusTrap(!!open, ref, onClose);
 
+      const makeId = () => Math.random().toString(36).slice(2, 10);
+
+      const parseSpecRows = (specs) => {
+        const cleaned = stripMetaSpecs(specs);
+        return cleaned
+          .map((spec) => {
+            const raw = String(spec || '').trim();
+            const idx = raw.indexOf(':');
+            if (idx > 0) {
+              const label = raw.slice(0, idx).trim();
+              const value = raw.slice(idx + 1).trim();
+              if (label && value) return { id: makeId(), label, value };
+            }
+            return { id: makeId(), label: raw, value: '' };
+          })
+          .filter((row) => row.label);
+      };
+
+      const parseCsvLines = (raw) =>
+        String(raw || '')
+          .split(/[\n,]/g)
+          .map((v) => String(v).trim())
+          .filter(Boolean);
+
+      const normalizePriceOverrides = (raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        const out = {};
+        Object.entries(raw).forEach(([key, value]) => {
+          const normalizedKey = String(key || '').trim();
+          if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+          const numeric = Number(value);
+          if (Number.isFinite(numeric) && numeric >= 0) out[normalizedKey] = numeric;
+        });
+        return out;
+      };
+
       const [name, setName] = useState(product?.name || "");
       const [sku, setSku] = useState(product?.sku || "");
+      const [category, setCategory] = useState(product?.category || "All");
+      const [family, setFamily] = useState(extractFamilyFromProduct(product) || "");
       const [price, setPrice] = useState(String(product?.price ?? 0));
       const [description, setDescription] = useState(product?.description || "");
+      const [specRows, setSpecRows] = useState(() => parseSpecRows(product?.specs));
 
       // images + gallery
       const [images, setImages] = useState(() => {
@@ -2928,19 +4198,75 @@
         return v;
       });
 
+      const [optionDraft, setOptionDraft] = useState({});
+      const [newGroupOpen, setNewGroupOpen] = useState(false);
+      const [newGroupName, setNewGroupName] = useState('');
+      const [newGroupOptions, setNewGroupOptions] = useState('');
+
+      const [inventoryEnabled, setInventoryEnabled] = useState(() => Object.keys(normalizeInventoryObject(product?.inventory)).length > 0);
+      const [inventoryDraft, setInventoryDraft] = useState(() => {
+        const normalized = normalizeInventoryObject(product?.inventory);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(Math.floor(Number(value) || 0));
+        });
+        return out;
+      });
+      const [inventoryDefault, setInventoryDefault] = useState('');
+
+      const [priceOverridesEnabled, setPriceOverridesEnabled] = useState(() => Object.keys(normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY])).length > 0);
+      const [priceOverridesDraft, setPriceOverridesDraft] = useState(() => {
+        const normalized = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(value);
+        });
+        return out;
+      });
+
       useEffect(() => {
         if (!open) return;
         setName(product?.name || "");
         setSku(product?.sku || "");
+        setCategory(product?.category || "All");
+        setFamily(extractFamilyFromProduct(product) || "");
         setPrice(String(product?.price ?? 0));
         setDescription(product?.description || "");
+        setSpecRows(parseSpecRows(product?.specs));
         const list = Array.isArray(product?.images) && product.images.length
           ? product.images
           : (product?.image ? [product.image] : []);
         setImages([...list]);
         setGalleryIndex(0);
-        setVariants({ ...(product?.variants || {}) });
-      }, [open, product]);
+        const nextVariants = { ...(product?.variants || {}) };
+        if (nextVariants.Color && !Array.isArray(nextVariants.Color)) nextVariants.Color = [nextVariants.Color];
+        if (nextVariants.Model && !Array.isArray(nextVariants.Model)) nextVariants.Model = [nextVariants.Model];
+        setVariants(nextVariants);
+        setOptionDraft({});
+        setNewGroupOpen(false);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        const normalizedInventory = normalizeInventoryObject(product?.inventory);
+        setInventoryEnabled(Object.keys(normalizedInventory).length > 0);
+        setInventoryDraft(() => {
+          const out = {};
+          Object.entries(normalizedInventory).forEach(([key, value]) => {
+            out[String(key)] = String(Math.floor(Number(value) || 0));
+          });
+          return out;
+        });
+        setInventoryDefault('');
+        const normalizedPrices = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        setPriceOverridesEnabled(Object.keys(normalizedPrices).length > 0);
+        setPriceOverridesDraft(() => {
+          const out = {};
+          Object.entries(normalizedPrices).forEach(([key, value]) => {
+            out[String(key)] = String(value);
+          });
+          return out;
+        });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [open, product?.id]);
 
       const onFiles = (e) => {
         const files = Array.from(e.target.files || []);
@@ -2956,33 +4282,274 @@
       const prevImg = () => setGalleryIndex(i => (i - 1 + images.length) % images.length);
       const nextImg = () => setGalleryIndex(i => (i + 1) % images.length);
 
+      const familyOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.families)
+          ? catalogConfig.families.map((f) => String(f?.name || '').trim()).filter(Boolean)
+          : [];
+        const base = list.length ? list : ['iPhone', 'Samsung S', 'Samsung A', 'Accessories'];
+        const current = String(family || '').trim();
+        return current && !base.includes(current) ? [...base, current] : base;
+      }, [catalogConfig, family]);
+
+      const categoryOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.categories) ? catalogConfig.categories.filter(Boolean) : [];
+        const base = list.length ? list : CATEGORIES.filter((c) => c !== 'All');
+        const current = String(category || '').trim();
+        const withAll = ['All', ...base];
+        return current && current !== 'All' && !base.includes(current) ? [...withAll, current] : withAll;
+      }, [catalogConfig, category]);
+
+      const familyModels = useMemo(() => {
+        const famName = String(family || '').trim();
+        const families = Array.isArray(catalogConfig?.families) ? catalogConfig.families : [];
+        const match = families.find((f) => String(f?.name || '').trim() === famName);
+        const list = Array.isArray(match?.models) ? match.models.map((m) => String(m).trim()).filter(Boolean) : [];
+        if (list.length) return list;
+        const lower = famName.toLowerCase();
+        if (lower.includes('iphone')) return IPHONE_MODELS;
+        if (lower.includes('samsung s')) return SAMSUNG_S_MODELS;
+        if (lower.includes('samsung a')) return SAMSUNG_A_MODELS;
+        return [...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS];
+      }, [catalogConfig, family]);
+
+      const customerOptionMap = useMemo(() => {
+        const out = {};
+        Object.entries(variants || {}).forEach(([key, val]) => {
+          if (!key || String(key).startsWith('__')) return;
+          if (!Array.isArray(val) || val.length === 0) return;
+          out[key] = val;
+        });
+        return out;
+      }, [variants]);
+
+      const optionKeys = useMemo(() => {
+        const keys = Object.keys(customerOptionMap);
+        const priority = ['Model', 'Color'];
+        keys.sort((a, b) => {
+          const ai = priority.indexOf(a);
+          const bi = priority.indexOf(b);
+          if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+          return a.localeCompare(b);
+        });
+        return keys;
+      }, [customerOptionMap]);
+
+      const combos = useMemo(() => computeVariantCombos(customerOptionMap), [customerOptionMap]);
+      const comboKeySet = useMemo(() => new Set(combos.map(({ key }) => key)), [combos]);
+
+      const formatComboLabel = (selection) => {
+        const entries = Object.entries(selection || {})
+          .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (!entries.length) return 'Base product';
+        return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
+      };
+
+      const models = Array.from(new Set([...(Array.isArray(variants.Model) ? variants.Model : [])]));
+      const colors = Array.from(new Set([...(Array.isArray(variants.Color) ? variants.Color : [])]));
+
+      const moveImageToFront = (index) => {
+        setImages((prev) => {
+          if (index <= 0 || index >= prev.length) return prev;
+          const next = [...prev];
+          const [picked] = next.splice(index, 1);
+          next.unshift(picked);
+          return next;
+        });
+        setGalleryIndex(0);
+      };
+
+      const removeImage = (index) => {
+        setImages((prev) => prev.filter((_, i) => i !== index));
+        setGalleryIndex((i) => {
+          if (i === index) return 0;
+          if (i > index) return i - 1;
+          return i;
+        });
+      };
+
+      const setRowField = (id, field, value) => {
+        setSpecRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+      };
+      const addSpecRow = () => setSpecRows((prev) => [...prev, { id: makeId(), label: '', value: '' }]);
+      const removeSpecRow = (id) => setSpecRows((prev) => prev.filter((row) => row.id !== id));
+
+      const setGroupOptions = (groupKey, list) => {
+        const key = String(groupKey || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const cleaned = Array.from(new Set((Array.isArray(list) ? list : []).map((v) => String(v).trim()).filter(Boolean)));
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          if (cleaned.length) next[key] = cleaned;
+          else delete next[key];
+          return next;
+        });
+      };
+
+      const removeGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+        setOptionDraft((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+      };
+
+      const addOptionsToGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        const parsed = parseCsvLines(optionDraft[key] || '');
+        if (!parsed.length) return;
+        const current = Array.isArray(variants?.[key]) ? variants[key] : [];
+        setGroupOptions(key, [...current, ...parsed]);
+        setOptionDraft((prev) => ({ ...(prev || {}), [key]: '' }));
+      };
+
+      const createNewGroup = () => {
+        const key = String(newGroupName || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const parsed = parseCsvLines(newGroupOptions);
+        if (!parsed.length) return;
+        setGroupOptions(key, parsed);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        setNewGroupOpen(false);
+      };
+
+      const applyInventoryDefaultToAll = () => {
+        const trimmed = String(inventoryDefault || '').trim();
+        if (!trimmed) return;
+        const numeric = Number(trimmed);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(Math.floor(numeric));
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = value; });
+          return next;
+        });
+      };
+
+      const clearInventoryAll = () => {
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = ''; });
+          return next;
+        });
+      };
+
+      const clearPricesAll = () => {
+        setPriceOverridesDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { if (key !== INVENTORY_BASE_KEY) next[key] = ''; });
+          return next;
+        });
+      };
+
       const save = () => {
-        const sanitizedVariants = Object.fromEntries(
-          Object.entries(variants || {}).map(([key, val]) => {
-            const list = Array.isArray(val) ? val.map(v => String(v).trim()).filter(Boolean) : [];
-            return [key, Array.from(new Set(list))];
-          }).filter(([, list]) => Array.isArray(list) && list.length)
-        );
         const trimmedName = name.trim() || product.name;
         const trimmedSku = sku.trim() || product.sku;
         const priceNumber = Number(price);
+        const resolvedPrice = Number.isFinite(priceNumber) && priceNumber >= 0 ? priceNumber : Number(product.price) || 0;
+        const resolvedCategory = String(category || product.category || '').trim() || 'All';
+        const resolvedFamily = String(family || '').trim();
+
+        const existingMetaSpecs = (Array.isArray(product?.specs) ? product.specs : [])
+          .filter((s) => {
+            const value = String(s || '');
+            return value && value.startsWith(META_SPEC_PREFIX) && !value.startsWith(META_FAMILY_PREFIX);
+          })
+          .map((s) => String(s));
+
+        const infoSpecs = specRows
+          .map((row) => {
+            const label = String(row?.label || '').trim();
+            if (!label) return null;
+            const value = String(row?.value || '').trim();
+            return value ? `${label}: ${value}` : label;
+          })
+          .filter(Boolean);
+
+        const specs = Array.from(new Set([
+          ...(resolvedFamily ? [`${META_FAMILY_PREFIX}${resolvedFamily}`] : []),
+          ...existingMetaSpecs,
+          ...infoSpecs,
+        ]));
+
+        const preservedMetaVariants = {};
+        if (product?.variants && typeof product.variants === 'object' && !Array.isArray(product.variants)) {
+          Object.entries(product.variants).forEach(([key, val]) => {
+            if (!key || key === PRICE_OVERRIDE_VARIANTS_KEY) return;
+            if (Array.isArray(val)) return;
+            if (String(key).startsWith('__')) preservedMetaVariants[key] = val;
+          });
+        }
+
+        const sanitizedGroups = {};
+        Object.entries(customerOptionMap || {}).forEach(([key, val]) => {
+          const label = String(key || '').trim();
+          if (!label) return;
+          const list = Array.from(new Set((Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter(Boolean)));
+          if (list.length) sanitizedGroups[label] = list;
+        });
+
+        const nextVariants = { ...preservedMetaVariants, ...sanitizedGroups };
+
+        if (priceOverridesEnabled) {
+          const baseNumeric = resolvedPrice;
+          const priceMap = {};
+          Object.entries(priceOverridesDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            if (Math.abs(numeric - baseNumeric) < 1e-9) return;
+            priceMap[normalizedKey] = numeric;
+          });
+          if (Object.keys(priceMap).length) nextVariants[PRICE_OVERRIDE_VARIANTS_KEY] = priceMap;
+        }
+
+        const nextInventory = {};
+        if (inventoryEnabled) {
+          Object.entries(inventoryDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            nextInventory[normalizedKey] = Math.floor(numeric);
+          });
+        }
+
+        const uniqueImages = Array.from(new Set((images || []).map((src) => String(src || '')).filter(Boolean)));
         const normalized = normalizeProductRow({
           ...(product || {}),
           name: trimmedName,
           sku: trimmedSku,
-          price: Number.isFinite(priceNumber) && priceNumber > 0 ? priceNumber : Number(product.price) || 0,
+          category: resolvedCategory,
+          price: resolvedPrice,
           description,
-          images: images.length ? images : undefined,
-          image: images[0] || undefined,
-          variants: sanitizedVariants
+          images: uniqueImages,
+          image: uniqueImages[0] || undefined,
+          specs,
+          variants: nextVariants,
+          inventory: nextInventory,
         });
         onSave(normalized, product?.id);
         onClose();
       };
 
       const isOwnerItem = !!product?.id?.startsWith?.('owner-');
-      const models = Array.from(new Set([...(variants.Model || [])]));
-      const colors = Array.from(new Set([...(variants.Color || [])]));
 
       if (!open || !product) return null;
 
@@ -3044,7 +4611,7 @@
                         <button type="button" onClick={()=> setGalleryIndex(i)} className="absolute inset-0">
                           <img src={resolveImageSrc(src, product.name)} alt="" className="h-full w-full object-cover" />
                         </button>
-                        <button type="button" onClick={()=> setImages(prev => prev.filter((_,idx)=> idx!==i))}
+                        <button type="button" onClick={()=> removeImage(i)}
                           className="absolute -right-1 -top-1 rounded-full bg-white border p-0.5 shadow" aria-label={`Remove photo ${i+1}`}>×</button>
                       </div>
                     ))}
@@ -3054,6 +4621,27 @@
 
               {/* Right: editable form */}
               <div className="flex min-w-0 flex-col gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Family</span>
+                    <select value={family} onChange={(e) => setFamily(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      <option value="">(none)</option>
+                      {familyOptions.map((f) => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Category</span>
+                    <select value={category} onChange={(e) => setCategory(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      {categoryOptions.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <label className="block text-sm">
                   <span className="mb-1 block text-slate-700">Name</span>
                   <input value={name} onChange={(e)=> setName(e.target.value)}
@@ -3067,7 +4655,7 @@
                 </label>
 
                 <label className="block text-sm">
-                  <span className="mb-1 block text-slate-700">Price</span>
+                  <span className="mb-1 block text-slate-700">Base price</span>
                   <input type="number" min={0} step="0.01" value={price} onChange={(e)=> setPrice(e.target.value)}
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
@@ -3078,59 +4666,231 @@
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
 
-                {/* Variants — same idea as your previous editor but cleaner */}
-                <div className="grid gap-3">
-                  {!!(product?.variants?.Model) && (
-                    <PillsMulti
-                      label="Models"
-                      options={[...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS]}
-                      value={models}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Model: arr }))}
-                    />
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Product information</span>
+                    <button type="button" onClick={addSpecRow}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white">Add</button>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {specRows.map((row) => (
+                      <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center">
+                        <input
+                          value={row.label}
+                          onChange={(e) => setRowField(row.id, 'label', e.target.value)}
+                          placeholder="Label"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <input
+                          value={row.value}
+                          onChange={(e) => setRowField(row.id, 'value', e.target.value)}
+                          placeholder="Value (optional)"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeSpecRow(row.id)}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                          aria-label="Remove row"
+                        >×</button>
+                      </div>
+                    ))}
+                    {specRows.length === 0 && (
+                      <p className="text-xs text-slate-500">No product information yet.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Customer options</span>
+                    <button
+                      type="button"
+                      onClick={() => setNewGroupOpen((v) => !v)}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                    >
+                      Add option group
+                    </button>
+                  </div>
+
+                  {newGroupOpen && (
+                    <div className="mt-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Group name</span>
+                          <input
+                            value={newGroupName}
+                            onChange={(e) => setNewGroupName(e.target.value)}
+                            placeholder="e.g. RAM"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Options</span>
+                          <textarea
+                            rows={2}
+                            value={newGroupOptions}
+                            onChange={(e) => setNewGroupOptions(e.target.value)}
+                            placeholder="One per line or comma-separated"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-2 flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setNewGroupOpen(false); setNewGroupName(''); setNewGroupOptions(''); }}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                        >
+                          Cancel
+                        </button>
+                        <button type="button" onClick={createNewGroup} className="rounded-full bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-muted">
+                          Add group
+                        </button>
+                      </div>
+                    </div>
                   )}
-                  {!!(product?.variants?.Color) && (
-                    <PillsMulti
-                      label="Colors"
-                      options={CASE_COLORS}
-                      value={colors}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Color: arr }))}
-                    />
-                  )}
-                  {Object.entries(product?.variants||{})
-                    .filter(([k])=> k!=='Model' && k!=='Color')
-                    .map(([k,opts])=> (
-                      <div key={k} className="text-sm">
-                        <span className="mb-1 block text-slate-700">{k}</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {(variants[k]||opts).map(opt => (
-                            <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600">
-                              {opt}
-                              <button type="button" onClick={()=> setVariants(v=> ({...v, [k]: (v[k]||opts).filter(x=> x!==opt)}))} aria-label={`Remove ${opt}`}>×</button>
-                            </span>
-                          ))}
+
+                  <div className="mt-3 grid gap-3">
+                    {optionKeys.length === 0 && (
+                      <p className="text-xs text-slate-500">No customer option groups yet.</p>
+                    )}
+                    {optionKeys.map((k) => {
+                      const opts = Array.isArray(variants?.[k]) ? variants[k] : [];
+                      const draft = optionDraft[k] || '';
+                      const optionsList = k === 'Model'
+                        ? Array.from(new Set([...(familyModels || []), ...opts]))
+                        : (k === 'Color' ? Array.from(new Set([...(CASE_COLORS || []), ...opts])) : opts);
+
+                      return (
+                        <div key={k} className="space-y-2 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-slate-800">{k}</span>
+                            <button type="button" onClick={() => removeGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                              aria-label={`Remove ${k}`}>×</button>
+                          </div>
+
+                          {k === 'Model' || k === 'Color' ? (
+                            <PillsMulti
+                              label={k === 'Model' ? 'Models' : 'Colors'}
+                              options={optionsList}
+                              value={opts}
+                              onChange={(arr) => setGroupOptions(k, arr)}
+                            />
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5 text-xs">
+                              {opts.map((opt) => (
+                                <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white px-2.5 py-1 text-xs font-medium text-slate-600">
+                                  {opt}
+                                  <button type="button" onClick={() => setGroupOptions(k, opts.filter((x) => x !== opt))}
+                                    className="text-slate-500 hover:text-slate-800" aria-label={`Remove ${opt}`}>×</button>
+                                </span>
+                              ))}
+                              {opts.length === 0 && <span className="text-xs text-slate-500">No options yet.</span>}
+                            </div>
+                          )}
+
+                          <div className="flex gap-2">
+                            <input
+                              value={draft}
+                              onChange={(e) => setOptionDraft((prev) => ({ ...(prev || {}), [k]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addOptionsToGroup(k);
+                                }
+                              }}
+                              placeholder="Add options (comma or newline)"
+                              className="flex-1 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                            <button type="button" onClick={() => addOptionsToGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Add</button>
+                          </div>
                         </div>
-                        <div className="mt-1 flex gap-2">
-                          <input type="text" placeholder={`Add ${k} option`} className="w-44 rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-medium text-slate-700 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onKeyDown={(e)=> {
-                              if (e.key==='Enter') {
-                                const val = e.currentTarget.value.trim();
-                                if (val) setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                e.currentTarget.value='';
-                              }
-                            }}/>
-                          <button type="button" className="rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onClick={(e)=> {
-                              const inp = e.currentTarget.previousSibling;
-                              if (inp && inp.value) {
-                                const val = inp.value.trim();
-                                setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                inp.value='';
-                              }
-                            }}>Add</button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Stock limits (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={inventoryEnabled} onChange={(e) => setInventoryEnabled(e.target.checked)} />
+                      Limit stock
+                    </label>
+                  </div>
+                  {inventoryEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <input
+                          value={inventoryDefault}
+                          onChange={(e) => setInventoryDefault(e.target.value)}
+                          inputMode="numeric"
+                          placeholder="Default (optional)"
+                          className="w-full sm:w-44 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <div className="flex gap-2">
+                          <button type="button" onClick={applyInventoryDefaultToAll}
+                            className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Apply to all</button>
+                          <button type="button" onClick={clearInventoryAll}
+                            className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear</button>
                         </div>
                       </div>
-                    ))
-                  }
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => (
+                          <div key={key} className="flex items-center justify-between gap-3">
+                            <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                            <input
+                              value={inventoryDraft[key] ?? ''}
+                              onChange={(e) => setInventoryDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                              inputMode="numeric"
+                              placeholder="∞"
+                              className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank for unlimited stock.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Variant prices (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={priceOverridesEnabled} onChange={(e) => setPriceOverridesEnabled(e.target.checked)} />
+                      Override prices
+                    </label>
+                  </div>
+                  {priceOverridesEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex justify-end">
+                        <button type="button" onClick={clearPricesAll}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear overrides</button>
+                      </div>
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => {
+                          if (key === INVENTORY_BASE_KEY) return null;
+                          return (
+                            <div key={key} className="flex items-center justify-between gap-3">
+                              <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                              <input
+                                value={priceOverridesDraft[key] ?? ''}
+                                onChange={(e) => setPriceOverridesDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                                inputMode="decimal"
+                                placeholder={String(Number(price) || 0)}
+                                className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank to use the base price.</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-2 flex justify-end gap-3">
@@ -3144,7 +4904,7 @@
       );
     }
 
-    function OwnerManager({ products, onClose, onEdit, onHide, onDelete, onSave }) {
+    function OwnerManager({ products, catalogConfig, onClose, onEdit, onHide, onDelete, onSave }) {
       const [search, setSearch] = useState("");
       const [editing, setEditing] = useState(null);
 
@@ -3180,7 +4940,7 @@
               )
             ),
             React.createElement('div', { className: 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white transition hover:-translate-y-0.5 hover:shadow-soft-xl' }, React.createElement('div', { className: 'aspect-square w-full bg-slate-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-slate-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 text-xs font-medium text-slate-600' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-slate-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-muted' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-[var(--surface-border)] bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white/90' }, 'Hide')))))) ),
-          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, onSave: onSave, onHide: onHide, onDelete: onDelete })
+          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, catalogConfig: catalogConfig, onSave: onSave, onHide: onHide, onDelete: onDelete })
         )
       );
     }
@@ -3214,6 +4974,7 @@
         if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       }, []);
       const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
+      const { catalogConfig, saveCatalogConfig } = useCatalogConfig(ownerProducts, setOwnerProducts);
       const { orders, loadingOrders, ordersError, ordersMeta, refreshOrders, updateOrderStatus } = useOwnerOrders();
 
       const shouldLockScroll = Boolean(selectedProduct || cartOpen);
@@ -3225,6 +4986,7 @@
         const newProducts = [];
         
         ownerProducts.forEach(op => {
+          if (op && op.id === CONFIG_PRODUCT_ID) return;
           if (op.sourceId && map.has(op.sourceId)) {
             if (op.hidden) {
               map.delete(op.sourceId);
@@ -3353,6 +5115,8 @@
             addProduct,
             onNotify: pushNotice,
             onNavigate: setOwnerSection,
+            catalogConfig,
+            saveCatalogConfig,
           }),
         },
         {
@@ -3362,6 +5126,7 @@
           icon: ClipboardIcon,
           element: React.createElement(OwnerManager, {
             products: allProducts,
+            catalogConfig,
             onClose: () => setOwnerSection('add'),
             onEdit: (p) => setSelectedProduct({ __edit: true, product: p }),
             onHide: (baseId) => hideBase(baseId),
@@ -3384,7 +5149,7 @@
             onNotify: pushNotice,
           }),
         },
-      ], [ownerDashboardElement, allProducts, orders, loadingOrders, ordersError, ordersMeta, refreshOrders, updateOrderStatus, deleteOwnerProduct, hideBase, saveEdit, setOwnerSection, pushNotice]);
+      ], [ownerDashboardElement, allProducts, ownerProducts, orders, loadingOrders, ordersError, ordersMeta, refreshOrders, updateOrderStatus, deleteOwnerProduct, hideBase, saveEdit, setOwnerSection, pushNotice, addProduct, catalogConfig, saveCatalogConfig]);
 
   const cartQty = cart.items.reduce((sum, it) => sum + (Number(it.qty)||0), 0);
 

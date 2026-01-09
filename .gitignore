@@ -5,6 +5,8 @@ node_modules/
 *.zip
 old_site_backup_*
 .tmp/
+.codex-backups/
+test-results/
 
 # Local Netlify folder
 .netlify

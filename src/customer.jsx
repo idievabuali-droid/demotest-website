@@ -51,6 +51,67 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     const DEFAULT_OWNER_MODE = OWNER_PORTAL_ONLY || document.body.dataset.defaultOwner === 'true';
     const OWNER_API_ENDPOINT = '/.netlify/functions/catalogue';
     const INVENTORY_BASE_KEY = '__base__';
+    const CONFIG_PRODUCT_ID = '__catalog_config__';
+    const META_SPEC_PREFIX = '__';
+    const META_FAMILY_PREFIX = '__family:';
+    const PRICE_OVERRIDE_VARIANTS_KEY = '__prices';
+
+    const stripMetaSpecs = (specs) =>
+      (Array.isArray(specs) ? specs : []).filter((s) => {
+        const value = String(s || '');
+        return value && !value.startsWith(META_SPEC_PREFIX);
+      });
+
+    const buildVariantOptionSet = (variants) => {
+      const set = new Set();
+      if (!variants || typeof variants !== 'object') return set;
+      Object.values(variants).forEach((raw) => {
+        if (!Array.isArray(raw)) return;
+        raw.forEach((value) => {
+          const normalized = String(value || '').trim().toLowerCase();
+          if (normalized) set.add(normalized);
+        });
+      });
+      return set;
+    };
+
+    const filterSpecsForDisplay = (specs, variants) => {
+      const optionSet = buildVariantOptionSet(variants);
+      return stripMetaSpecs(specs).filter((s) => !optionSet.has(String(s || '').trim().toLowerCase()));
+    };
+
+    const splitLabeledSpec = (spec) => {
+      const value = String(spec || '').trim();
+      const idx = value.indexOf(':');
+      if (idx <= 0) return null;
+      const label = value.slice(0, idx).trim();
+      const detail = value.slice(idx + 1).trim();
+      if (!label || !detail) return null;
+      if (label.length > 40 || detail.length > 120) return null;
+      return { label, detail };
+    };
+
+    const extractFamilyFromProduct = (product) => {
+      const specs = Array.isArray(product?.specs) ? product.specs : [];
+      const match = specs.find((s) => typeof s === 'string' && s.startsWith(META_FAMILY_PREFIX));
+      return match ? String(match).slice(META_FAMILY_PREFIX.length).trim() : '';
+    };
+
+    const inferFamilyFromProduct = (product) => {
+      const variants = product?.variants && typeof product.variants === 'object' ? product.variants : {};
+      const modelOptions = Array.isArray(variants.Model) ? variants.Model : [];
+      const joined = modelOptions.map((m) => String(m || '').toLowerCase());
+      if (joined.some((m) => m.startsWith('iphone'))) return 'iPhone';
+      if (joined.some((m) => m.startsWith('galaxy a'))) return 'Samsung A';
+      if (joined.some((m) => m.startsWith('galaxy s'))) return 'Samsung S';
+      return 'Accessories';
+    };
+
+    const getProductFamily = (product) => {
+      const explicit = extractFamilyFromProduct(product);
+      if (explicit) return explicit;
+      return inferFamilyFromProduct(product);
+    };
 
     const buildVariantKey = (selection = {}) => {
       const entries = Object.entries(selection || {}).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '');
@@ -71,6 +132,39 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         }
       });
       return result;
+    };
+
+    const normalizePriceOverrides = (raw) => {
+      if (!raw || typeof raw !== 'object') return {};
+      const result = {};
+      Object.entries(raw).forEach(([key, value]) => {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric) && numeric >= 0) {
+          result[(key && key.trim()) || INVENTORY_BASE_KEY] = numeric;
+        }
+      });
+      return result;
+    };
+
+    const getProductPriceMap = (product) =>
+      normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+
+    const getUnitPriceForKey = (product, key) => {
+      const base = Number(product?.price) || 0;
+      const map = getProductPriceMap(product);
+      const normalizedKey = (key && String(key).trim()) || INVENTORY_BASE_KEY;
+      if (Object.prototype.hasOwnProperty.call(map, normalizedKey)) return map[normalizedKey];
+      return base;
+    };
+
+    const getProductPriceRange = (product) => {
+      const base = Number(product?.price) || 0;
+      const map = getProductPriceMap(product);
+      const values = Object.values(map);
+      if (!values.length) return { min: base, max: base, hasOverrides: false };
+      const min = Math.min(base, ...values);
+      const max = Math.max(base, ...values);
+      return { min, max, hasOverrides: min !== max };
     };
 
     // ---- Supabase Configuration ----
@@ -150,11 +244,26 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       }
     };
 
+    const getOwnerAuthHeader = async () => {
+      try {
+        if (!supabase) return null;
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        return token ? `Bearer ${token}` : null;
+      } catch {
+        return null;
+      }
+    };
+
     const callOwnerApi = async (action, payload) => {
       try {
+        const authHeader = await getOwnerAuthHeader();
         const response = await fetch(OWNER_API_ENDPOINT, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authHeader ? { Authorization: authHeader } : {}),
+          },
           body: JSON.stringify({ action, data: payload }),
         });
         if (!response.ok) {
@@ -233,13 +342,16 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const images = Array.isArray(product.images)
         ? product.images
         : (product.image ? [product.image] : []);
-      if (images.length) payload.images = images;
-      if (Array.isArray(product.specs) && product.specs.length) payload.specs = product.specs;
-      if (product.variants && Object.keys(product.variants).length) payload.variants = product.variants;
+      // Always include these fields so edits can CLEAR them (empty array/object)
+      payload.images = images;
+      payload.specs = Array.isArray(product.specs) ? product.specs : [];
+      payload.variants = (product.variants && typeof product.variants === 'object' && !Array.isArray(product.variants))
+        ? product.variants
+        : {};
       if (product.sourceId) payload.sourceid = product.sourceId;
       if (product.hidden) payload.hidden = true;
       const normalizedInventory = normalizeInventoryObject(product.inventory);
-      if (Object.keys(normalizedInventory).length) payload.inventory = normalizedInventory;
+      payload.inventory = normalizedInventory;
       return payload;
     };
 
@@ -360,6 +472,46 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       "Samsung S": SAMSUNG_S_MODELS,
       "Samsung A": SAMSUNG_A_MODELS
     };
+
+    const buildDefaultCatalogConfig = () => ({
+      version: 1,
+      categories: CATEGORIES.filter((c) => c !== 'All'),
+      families: [
+        { id: 'iphone', name: 'iPhone', models: [...IPHONE_MODELS] },
+        { id: 'samsung_s', name: 'Samsung S', models: [...SAMSUNG_S_MODELS] },
+        { id: 'samsung_a', name: 'Samsung A', models: [...SAMSUNG_A_MODELS] },
+        { id: 'accessories', name: 'Accessories', models: [] },
+      ],
+      groupsByCategory: {},
+      groupOverridesByCategoryFamily: {},
+      groupHiddenByCategoryFamily: {},
+    });
+
+    const mergeCatalogConfig = (raw) => {
+      const base = buildDefaultCatalogConfig();
+      if (!raw || typeof raw !== 'object') return base;
+      const next = { ...base, ...raw };
+      next.categories = Array.isArray(next.categories) ? next.categories.filter(Boolean) : base.categories;
+      next.families = Array.isArray(next.families) ? next.families.filter(Boolean) : base.families;
+      next.groupsByCategory = next.groupsByCategory && typeof next.groupsByCategory === 'object' ? next.groupsByCategory : {};
+      next.groupOverridesByCategoryFamily = next.groupOverridesByCategoryFamily && typeof next.groupOverridesByCategoryFamily === 'object' ? next.groupOverridesByCategoryFamily : {};
+      next.groupHiddenByCategoryFamily = next.groupHiddenByCategoryFamily && typeof next.groupHiddenByCategoryFamily === 'object' ? next.groupHiddenByCategoryFamily : {};
+      return next;
+    };
+
+    function useCatalogConfig(ownerProducts) {
+      const [catalogConfig, setCatalogConfig] = useState(() => buildDefaultCatalogConfig());
+
+      useEffect(() => {
+        const configRow = (ownerProducts || []).find((p) => p && p.id === CONFIG_PRODUCT_ID);
+        const raw = configRow?.variants?.__config;
+        if (raw && typeof raw === 'object') {
+          setCatalogConfig(mergeCatalogConfig(raw));
+        }
+      }, [ownerProducts]);
+
+      return catalogConfig;
+    }
 
     // Common lists
     const QUALITY_GRADE = ["Original","OEM","AAA","Aftermarket","Refurb"];
@@ -927,9 +1079,11 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       return React.createElement('a', { href: '#main', className: 'sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 rounded-full border border-[var(--surface-border)] bg-white/90 px-3 py-2 text-sm font-semibold text-brand shadow-sm backdrop-blur' }, 'Skip to content');
     }
 
-  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus, allowOwnerToggle }){
+  function Header({ onOpenCart, search, setSearch, ownerMode, setOwnerMode, cartQty, connectionStatus, allowOwnerToggle, families, family, setFamily }){
       const [scrolled, setScrolled] = useState(false);
       const hdrRef = useRef(null);
+      const familyScrollRef = useRef(null);
+      const [familyFade, setFamilyFade] = useState({ left: false, right: false });
       useEffect(()=>{ const onScroll=()=> setScrolled(window.scrollY>4); onScroll(); window.addEventListener('scroll', onScroll, { passive:true }); return ()=> window.removeEventListener('scroll', onScroll); },[]);
       // measure header height (incl. mobile search row) -> CSS var --header-offset
       useEffect(() => {
@@ -940,12 +1094,39 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         setVar();
         window.addEventListener('resize', setVar, { passive:true });
         return () => window.removeEventListener('resize', setVar);
-      }, [ownerMode, search]);
+      }, [ownerMode, search, families]);
+
+      useEffect(() => {
+        if (ownerMode) return;
+        const updateFade = () => {
+          const el = familyScrollRef.current;
+          if (!el) return;
+          const { scrollLeft, scrollWidth, clientWidth } = el;
+          const left = scrollLeft > 0;
+          const right = scrollLeft + clientWidth < scrollWidth - 1;
+          setFamilyFade(prev => (prev.left === left && prev.right === right ? prev : { left, right }));
+        };
+        updateFade();
+        const el = familyScrollRef.current;
+        if (!el) return;
+        el.addEventListener('scroll', updateFade, { passive: true });
+        window.addEventListener('resize', updateFade);
+        return () => {
+          el.removeEventListener('scroll', updateFade);
+          window.removeEventListener('resize', updateFade);
+        };
+      }, [ownerMode, families]);
       const statusSpec = connectionStatus === 'connected'
         ? { wrapper: 'border border-emerald-200 bg-emerald-50/80 text-emerald-600', dot: 'bg-emerald-500', label: 'Online' }
         : connectionStatus === 'error'
         ? { wrapper: 'border border-rose-200 bg-rose-50/80 text-rose-600', dot: 'bg-rose-500', label: 'Offline' }
         : { wrapper: 'border border-amber-200 bg-amber-50/80 text-amber-600', dot: 'bg-amber-400 animate-pulse', label: 'Connecting' };
+
+      const familyWrapperClasses = cx(
+        'chip-scroll -mx-4',
+        familyFade.left && 'show-left',
+        familyFade.right && 'show-right'
+      );
 
       return React.createElement('header', {
         ref: hdrRef,
@@ -1015,6 +1196,25 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                 className: 'w-full rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm font-medium text-slate-700 shadow-inner backdrop-blur focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent placeholder:text-slate-400'
               }),
               React.createElement(SearchIcon, { className: 'pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400' })
+            )
+          ),
+          !ownerMode && Array.isArray(families) && families.length > 0 && React.createElement('div', { className: 'mt-2 pb-2', 'aria-label': 'Families' },
+            React.createElement('div', { className: familyWrapperClasses },
+              React.createElement('div', { ref: familyScrollRef, className: 'chip-scroll-inner overflow-x-auto px-4' },
+                React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
+                  families.map((fam)=> React.createElement('button', {
+                    key: fam,
+                    onClick: ()=> setFamily(fam),
+                    'aria-pressed': family === fam,
+                    className: cx(
+                      'inline-flex items-center whitespace-nowrap rounded-full border px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-brand',
+                      family === fam
+                        ? 'border-transparent bg-brand text-white shadow-sm'
+                        : 'border-[var(--surface-border)] bg-white/70 text-slate-600 hover:text-slate-900 hover:bg-white/90'
+                    )
+                  }, fam))
+                )
+              )
             )
           )
         )
@@ -1092,7 +1292,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       );
     }
 
-    function CategoryChips({ active, setActive }){
+    function CategoryChips({ categories, active, setActive }){
       const containerRef = useRef(null);
       const [fade, setFade] = useState({ left: false, right: false });
 
@@ -1129,7 +1329,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             React.createElement('div', { className: wrapperClasses },
               React.createElement('div', { ref: containerRef, className: 'chip-scroll-inner overflow-x-auto px-4' },
                 React.createElement('div', { className: 'flex gap-2 py-2 text-[11px]' },
-                  CATEGORIES.map((cat)=> React.createElement('button', {
+                  (categories || []).map((cat)=> React.createElement('button', {
                     key: cat,
                     onClick: ()=> setActive(cat),
                     'aria-pressed': active===cat,
@@ -1160,22 +1360,78 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
     function ProductCard({ product, onOpen }){
       const [src, setSrc] = useState(getPrimaryImage(product));
       useEffect(()=>{ setSrc(getPrimaryImage(product)); },[product.image, product.images, product.name]);
+      const variantDims = Object.entries(product.variants || {})
+        .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
+        .map(([label]) => label);
+      const variantSummary = variantDims.map((dim) => {
+        const opts = Array.isArray(product?.variants?.[dim]) ? product.variants[dim] : [];
+        if (!opts.length) return null;
+        const preview = opts.slice(0, 3).join(', ');
+        const suffix = opts.length > 3 ? ` +${opts.length - 3}` : '';
+        return `${dim}: ${preview}${suffix}`;
+      }).filter(Boolean);
+      const filteredSpecs = filterSpecsForDisplay(product.specs, product.variants);
+      const specPairs = [];
+      const specTags = [];
+      filteredSpecs.forEach((spec) => {
+        const pair = splitLabeledSpec(spec);
+        if (pair) specPairs.push(pair);
+        else specTags.push(spec);
+      });
+      const pairsPreview = specPairs.slice(0, 4);
+      const tagsPreview = specTags.slice(0, 4);
+      const extraPairCount = Math.max(specPairs.length - pairsPreview.length, 0);
+      const extraTagCount = Math.max(specTags.length - tagsPreview.length, 0);
+      const hasInventoryLimits = product.inventory && typeof product.inventory === 'object' && Object.keys(product.inventory).length > 0;
+      const priceRange = getProductPriceRange(product);
+      const priceLabel = priceRange.min === priceRange.max
+        ? fmt(priceRange.min)
+        : `${fmt(priceRange.min)}–${fmt(priceRange.max)}`;
       return React.createElement('article', { className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition duration-200 hover:-translate-y-0.5 hover:shadow-soft-xl' },
         React.createElement('div', { className: 'aspect-square w-full overflow-hidden bg-slate-100' },
           React.createElement('img', { src: src, onError: ()=> setSrc(buildPlaceholderDataURI(product.name)), alt: product.name, className: 'h-full w-full object-cover', loading: 'lazy' })
         ),
         React.createElement('div', { className: 'flex flex-1 flex-col gap-4 p-5' },
           React.createElement('header', null,
-            React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
-            React.createElement('p', { className: 'mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
+            React.createElement('div', { className: 'flex flex-wrap items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500' },
+              hasInventoryLimits && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-amber-200 bg-amber-50/80 px-2.5 py-0.5 text-amber-700' }, 'Limited stock')
+            ),
+            React.createElement('div', { className: 'flex items-start justify-between gap-3' },
+              React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, product.name),
+              React.createElement('div', { className: 'flex flex-col items-end gap-1' },
+                React.createElement('span', { className: 'text-base font-semibold text-slate-900 whitespace-nowrap' }, priceLabel),
+                priceRange.hasOverrides && React.createElement('span', { className: 'text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400' }, 'Price range')
+              )
+            ),
+            product.description && React.createElement('p', {
+              className: 'mt-2 text-sm text-slate-600',
+              style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
+            }, product.description),
+            React.createElement('p', { className: 'mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400' }, 'SKU ', product.sku)
           ),
-          React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
-            (product.specs||[]).slice(0,4).map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s))
+          pairsPreview.length > 0 && React.createElement('dl', { className: 'grid grid-cols-1 gap-2 text-sm' },
+            pairsPreview.map(({ label, detail }) =>
+              React.createElement('div', { key: `${label}:${detail}`, className: 'flex items-baseline justify-between gap-3 rounded-2xl border border-[var(--surface-border)] bg-white/60 px-3 py-2' },
+                React.createElement('dt', { className: 'text-xs font-semibold uppercase tracking-[0.16em] text-slate-500' }, label),
+                React.createElement('dd', { className: 'text-sm font-semibold text-slate-900' }, detail)
+              )
+            ),
+            extraPairCount > 0 && React.createElement('div', { className: 'text-xs text-slate-500' }, `+${extraPairCount} more details`)
           ),
-          React.createElement('div', { className: 'mt-auto flex items-center justify-between' },
-            React.createElement('span', { className: 'text-sm font-semibold text-slate-900' }, fmt(product.price))
+          tagsPreview.length > 0 && React.createElement('div', { className: 'flex flex-wrap gap-1.5 text-[11px]' },
+            tagsPreview.map((s)=> React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)),
+            extraTagCount > 0 && React.createElement('span', { className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/60 px-2.5 py-0.5 font-medium text-slate-500' }, `+${extraTagCount} more`)
           ),
-          React.createElement('div', null,
+          variantSummary.length > 0 && React.createElement('div', { className: 'rounded-2xl border border-[var(--surface-border)] bg-white/60 px-3 py-2 text-xs text-slate-600' },
+            React.createElement('div', { className: 'text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500' }, 'Options to choose'),
+            React.createElement('div', { className: 'mt-1 space-y-1' },
+              variantSummary.slice(0, 2).map((line) =>
+                React.createElement('p', { key: line, className: 'font-medium text-slate-700' }, line)
+              ),
+              variantSummary.length > 2 && React.createElement('p', { className: 'text-slate-500' }, `+${variantSummary.length - 2} more option groups`)
+            )
+          ),
+          React.createElement('div', { className: 'mt-auto' },
             React.createElement('button', {
               type: 'button',
               onClick: () => onOpen(product),
@@ -1198,6 +1454,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
 
       const cartItemsSafe = Array.isArray(cartItems) ? cartItems : [];
       const inventoryMap = useMemo(() => normalizeInventoryObject(product.inventory), [product.inventory]);
+      const priceMap = useMemo(() => getProductPriceMap(product), [product.variants]);
       const existingQtyByKey = useMemo(() => {
         const map = {};
         cartItemsSafe.forEach((item) => {
@@ -1224,6 +1481,17 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const dims = Object.entries(v)
         .filter(([, arr]) => Array.isArray(arr) && arr.length > 0)
         .map(([label]) => label);
+      const displaySpecs = useMemo(() => {
+        const filtered = filterSpecsForDisplay(product.specs, product.variants);
+        const pairs = [];
+        const tags = [];
+        filtered.forEach((spec) => {
+          const pair = splitLabeledSpec(spec);
+          if (pair) pairs.push(pair);
+          else tags.push(spec);
+        });
+        return { pairs, tags };
+      }, [product.specs, product.variants]);
 
       // selected options per dimension (default = all)
       const [active, setActive] = useState({});
@@ -1306,6 +1574,9 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         combos.forEach(({ key, sel }) => {
           const requested = Number(qtyMap[key] || 0);
           if (!(requested > 0)) return;
+          const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+            ? priceMap[key]
+            : (Number(product.price) || 0);
           const availableTotal = inventoryMap[key] !== undefined
             ? inventoryMap[key]
             : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
@@ -1313,7 +1584,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
           const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
           const allowed = typeof remaining === 'number' ? Math.min(requested, remaining) : requested;
           if (allowed > 0) {
-            onAdd({ id: product.id, name: product.name, sku: product.sku, price: product.price, qty: allowed, variants: sel, inventoryKey: key });
+            onAdd({ id: product.id, name: product.name, sku: product.sku, price: unitPrice, qty: allowed, variants: sel, inventoryKey: key });
             addedAny = true;
             if (allowed < requested) trimmed = true;
           } else {
@@ -1329,6 +1600,9 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const totalSelected = useMemo(() => combos.reduce((sum, { key }) => {
         const requested = Number(qtyMap[key] || 0);
         if (!Number.isFinite(requested) || requested <= 0) return sum;
+        const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+          ? priceMap[key]
+          : (Number(product.price) || 0);
         const availableTotal = inventoryMap[key] !== undefined
           ? inventoryMap[key]
           : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
@@ -1336,8 +1610,8 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
         const allowed = typeof remaining === 'number' ? Math.min(requested, remaining) : requested;
         if (!(allowed > 0)) return sum;
-        return sum + allowed * product.price;
-      }, 0), [combos, qtyMap, product.price, inventoryMap, existingQtyByKey]);
+        return sum + allowed * unitPrice;
+      }, 0), [combos, qtyMap, product.price, priceMap, inventoryMap, existingQtyByKey]);
 
       const disabled = combos.every(({ key }) => {
         const requested = Number(qtyMap[key] || 0);
@@ -1411,6 +1685,24 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                   React.createElement('img', { src: images[0], onError: (e)=>{ e.currentTarget.src = buildPlaceholderDataURI(product.name); }, alt: `${product.name} – photo`, className: 'h-full w-full object-cover' })
                 ),
                 product.description && React.createElement('p', { className: 'text-sm text-slate-600' }, product.description),
+                (displaySpecs.pairs.length > 0 || displaySpecs.tags.length > 0) && React.createElement('section', {
+                  className: 'rounded-2xl border border-[var(--surface-border)] bg-white/80 p-4 text-sm shadow-sm backdrop-blur'
+                },
+                  React.createElement('h4', { className: 'text-xs font-semibold uppercase tracking-[0.18em] text-slate-500' }, 'Product information'),
+                  displaySpecs.pairs.length > 0 && React.createElement('dl', { className: 'mt-3 grid grid-cols-1 gap-2' },
+                    displaySpecs.pairs.map(({ label, detail }) =>
+                      React.createElement('div', { key: `${label}:${detail}`, className: 'flex items-baseline justify-between gap-3' },
+                        React.createElement('dt', { className: 'text-xs font-semibold uppercase tracking-[0.16em] text-slate-500' }, label),
+                        React.createElement('dd', { className: 'text-sm font-semibold text-slate-900' }, detail)
+                      )
+                    )
+                  ),
+                  displaySpecs.tags.length > 0 && React.createElement('div', { className: 'mt-3 flex flex-wrap gap-1.5 text-[11px]' },
+                    displaySpecs.tags.map((s) =>
+                      React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 font-medium text-slate-600' }, s)
+                    )
+                  )
+                ),
                 dims.map(dim => {
                   const opts = v[dim] || [];
                   const current = active[dim] || [];
@@ -1453,61 +1745,83 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                   combos.length === 0 ? (
                     React.createElement('p', { className: 'text-xs text-slate-500' }, 'Select at least one option.')
                   ) : (
-                    combos.map(({ key, sel }) => {
-                      const availableTotal = inventoryMap[key] !== undefined
-                        ? inventoryMap[key]
-                        : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
-                      const used = existingQtyByKey[key] || 0;
-                      const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
-                      const isOut = typeof remaining === 'number' && remaining <= 0;
-                      const limitWarning = limitWarnings[key];
-                      return React.createElement('div', {
-                        key,
-                        className: cx(
-                          'rounded-2xl border px-3 py-3 text-sm shadow-sm backdrop-blur sm:flex sm:items-center sm:justify-between',
-                          isOut ? 'border-rose-200 bg-rose-50/80 text-rose-700' : 'border-[var(--surface-border)] bg-white/85 text-slate-700'
-                        )
-                      },
-                        React.createElement('div', { className: 'space-y-1 text-sm' },
-                          Object.entries(sel).map(([k, val], i) => (
-                            React.createElement('span', { key: `${k}-${val}` },
-                              i>0 ? ' · ' : '',
-                              k === 'Color'
-                                ? React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: val }), val)
-                                : React.createElement('span', { className: 'font-medium text-slate-900' }, val)
-                            )
-                          )),
-                          Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium text-slate-900' }, 'Quantity'),
-                          typeof availableTotal === 'number'
-                            ? React.createElement('p', { className: 'text-xs text-slate-500' },
-                                `Remaining: ${Math.max(availableTotal - used, 0)}${used > 0 ? ` (of ${availableTotal})` : ''}`)
-                            : React.createElement('p', { className: 'text-xs text-slate-500' }, 'No stock limit')
-                        ),
-                        React.createElement('div', { className: 'mt-2 sm:mt-0' },
-                          React.createElement(NumberStepper, {
-                            value: Number(qtyMap[key] || 0),
-                            onChange: (v) => setQty(key, v),
-                            min: 0,
-                            max: typeof remaining === 'number' ? remaining : undefined,
-                            onLimit: (limit) => {
-                              if (typeof limit === 'number' && Number.isFinite(limit)) {
-                                setLimitWarnings(prev => ({ ...prev, [key]: limit }));
+                    React.createElement('div', { className: 'max-h-80 overflow-y-auto space-y-3 pr-1' },
+                      combos.map(({ key, sel }) => {
+                        const unitPrice = Object.prototype.hasOwnProperty.call(priceMap, key)
+                          ? priceMap[key]
+                          : (Number(product.price) || 0);
+                        const lineQty = Number(qtyMap[key] || 0);
+                        const availableTotal = inventoryMap[key] !== undefined
+                          ? inventoryMap[key]
+                          : (key === INVENTORY_BASE_KEY ? inventoryMap[INVENTORY_BASE_KEY] : undefined);
+                        const used = existingQtyByKey[key] || 0;
+                        const remaining = typeof availableTotal === 'number' ? Math.max(availableTotal - used, 0) : undefined;
+                        const isOut = typeof remaining === 'number' && remaining <= 0;
+                        const limitWarning = limitWarnings[key];
+                        return React.createElement('div', {
+                          key,
+                          className: cx(
+                            'rounded-2xl border px-3 py-3 text-sm shadow-sm backdrop-blur sm:flex sm:items-center sm:justify-between',
+                            isOut ? 'border-rose-200 bg-rose-50/80 text-rose-700' : 'border-[var(--surface-border)] bg-white/85 text-slate-700'
+                          )
+                        },
+                          React.createElement('div', { className: 'space-y-1 text-sm' },
+                            Object.entries(sel).map(([k, val], i) => (
+                              React.createElement('span', { key: `${k}-${val}` },
+                                i>0 ? ' · ' : '',
+                                k === 'Color'
+                                  ? React.createElement('span', { className: 'inline-flex items-center gap-1' }, React.createElement(ColorDot, { name: val }), val)
+                                  : React.createElement('span', { className: 'font-medium text-slate-900' }, val)
+                              )
+                            )),
+                            Object.keys(sel).length === 0 && React.createElement('span', { className: 'font-medium text-slate-900' }, 'Quantity'),
+                            React.createElement('p', { className: 'text-xs text-slate-500' },
+                              'Unit: ',
+                              React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(unitPrice)),
+                              lineQty > 0 ? React.createElement(React.Fragment, null,
+                                ' · Total: ',
+                                React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(unitPrice * lineQty))
+                              ) : null
+                            ),
+                            typeof availableTotal === 'number'
+                              ? React.createElement('p', { className: 'text-xs text-slate-500' },
+                                  `Remaining: ${Math.max(availableTotal - used, 0)}${used > 0 ? ` (of ${availableTotal})` : ''}`)
+                              : React.createElement('p', { className: 'text-xs text-slate-500' }, 'No stock limit')
+                          ),
+                          React.createElement('div', { className: 'mt-2 sm:mt-0' },
+                            React.createElement(NumberStepper, {
+                              value: Number(qtyMap[key] || 0),
+                              onChange: (v) => setQty(key, v),
+                              min: 0,
+                              max: typeof remaining === 'number' ? remaining : undefined,
+                              onLimit: (limit) => {
+                                if (typeof limit === 'number' && Number.isFinite(limit)) {
+                                  setLimitWarnings(prev => ({ ...prev, [key]: limit }));
+                                }
                               }
-                            }
-                          })
-                        ),
-                        limitWarning !== undefined ? React.createElement('p', { className: 'mt-2 text-xs font-medium text-rose-600 sm:ml-3 sm:mt-0 sm:text-right' }, `Only ${limitWarning} available for this selection.`) : null
-                      );
-                    })
+                            })
+                          ),
+                          limitWarning !== undefined ? React.createElement('p', { className: 'mt-2 text-xs font-medium text-rose-600 sm:ml-3 sm:mt-0 sm:text-right' }, `Only ${limitWarning} available for this selection.`) : null
+                        );
+                      })
+                    )
                   )
                 )
               ),
               React.createElement('aside', { className: 'glass-card rounded-3xl space-y-5 p-5' },
                 React.createElement('div', { className: 'space-y-2 text-sm' },
-                  React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
-                    React.createElement('span', null, 'Unit price'),
-                    React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(product.price))
-                  ),
+                  (() => {
+                    const base = Number(product.price) || 0;
+                    const values = Object.values(priceMap);
+                    const min = values.length ? Math.min(base, ...values) : base;
+                    const max = values.length ? Math.max(base, ...values) : base;
+                    const label = min === max ? fmt(min) : `${fmt(min)}–${fmt(max)}`;
+                    const title = values.length ? 'Price range' : 'Unit price';
+                    return React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
+                      React.createElement('span', null, title),
+                      React.createElement('span', { className: 'font-semibold text-slate-900' }, label)
+                    );
+                  })(),
                   React.createElement('div', { className: 'flex items-center justify-between text-slate-500' },
                     React.createElement('span', null, 'Selections'),
                     React.createElement('span', { className: 'font-medium text-slate-800' }, combos.length)
@@ -2364,14 +2678,53 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       );
     }
 
-    function OwnerProductModal({ open, onClose, product, onSave, onHide, onDelete }) {
+    function OwnerProductModal({ open, onClose, product, catalogConfig, onSave, onHide, onDelete }) {
       const ref = useRef(null);
       useFocusTrap(!!open, ref, onClose);
 
+      const makeId = () => Math.random().toString(36).slice(2, 10);
+
+      const parseSpecRows = (specs) => {
+        const cleaned = stripMetaSpecs(specs);
+        return cleaned
+          .map((spec) => {
+            const raw = String(spec || '').trim();
+            const idx = raw.indexOf(':');
+            if (idx > 0) {
+              const label = raw.slice(0, idx).trim();
+              const value = raw.slice(idx + 1).trim();
+              if (label && value) return { id: makeId(), label, value };
+            }
+            return { id: makeId(), label: raw, value: '' };
+          })
+          .filter((row) => row.label);
+      };
+
+      const parseCsvLines = (raw) =>
+        String(raw || '')
+          .split(/[\n,]/g)
+          .map((v) => String(v).trim())
+          .filter(Boolean);
+
+      const normalizePriceOverrides = (raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+        const out = {};
+        Object.entries(raw).forEach(([key, value]) => {
+          const normalizedKey = String(key || '').trim();
+          if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+          const numeric = Number(value);
+          if (Number.isFinite(numeric) && numeric >= 0) out[normalizedKey] = numeric;
+        });
+        return out;
+      };
+
       const [name, setName] = useState(product?.name || "");
       const [sku, setSku] = useState(product?.sku || "");
+      const [category, setCategory] = useState(product?.category || "All");
+      const [family, setFamily] = useState(extractFamilyFromProduct(product) || "");
       const [price, setPrice] = useState(String(product?.price ?? 0));
       const [description, setDescription] = useState(product?.description || "");
+      const [specRows, setSpecRows] = useState(() => parseSpecRows(product?.specs));
 
       // images + gallery
       const [images, setImages] = useState(() => {
@@ -2390,19 +2743,75 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         return v;
       });
 
+      const [optionDraft, setOptionDraft] = useState({});
+      const [newGroupOpen, setNewGroupOpen] = useState(false);
+      const [newGroupName, setNewGroupName] = useState('');
+      const [newGroupOptions, setNewGroupOptions] = useState('');
+
+      const [inventoryEnabled, setInventoryEnabled] = useState(() => Object.keys(normalizeInventoryObject(product?.inventory)).length > 0);
+      const [inventoryDraft, setInventoryDraft] = useState(() => {
+        const normalized = normalizeInventoryObject(product?.inventory);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(Math.floor(Number(value) || 0));
+        });
+        return out;
+      });
+      const [inventoryDefault, setInventoryDefault] = useState('');
+
+      const [priceOverridesEnabled, setPriceOverridesEnabled] = useState(() => Object.keys(normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY])).length > 0);
+      const [priceOverridesDraft, setPriceOverridesDraft] = useState(() => {
+        const normalized = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        const out = {};
+        Object.entries(normalized).forEach(([key, value]) => {
+          out[String(key)] = String(value);
+        });
+        return out;
+      });
+
       useEffect(() => {
         if (!open) return;
         setName(product?.name || "");
         setSku(product?.sku || "");
+        setCategory(product?.category || "All");
+        setFamily(extractFamilyFromProduct(product) || "");
         setPrice(String(product?.price ?? 0));
         setDescription(product?.description || "");
+        setSpecRows(parseSpecRows(product?.specs));
         const list = Array.isArray(product?.images) && product.images.length
           ? product.images
           : (product?.image ? [product.image] : []);
         setImages([...list]);
         setGalleryIndex(0);
-        setVariants({ ...(product?.variants || {}) });
-      }, [open, product]);
+        const nextVariants = { ...(product?.variants || {}) };
+        if (nextVariants.Color && !Array.isArray(nextVariants.Color)) nextVariants.Color = [nextVariants.Color];
+        if (nextVariants.Model && !Array.isArray(nextVariants.Model)) nextVariants.Model = [nextVariants.Model];
+        setVariants(nextVariants);
+        setOptionDraft({});
+        setNewGroupOpen(false);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        const normalizedInventory = normalizeInventoryObject(product?.inventory);
+        setInventoryEnabled(Object.keys(normalizedInventory).length > 0);
+        setInventoryDraft(() => {
+          const out = {};
+          Object.entries(normalizedInventory).forEach(([key, value]) => {
+            out[String(key)] = String(Math.floor(Number(value) || 0));
+          });
+          return out;
+        });
+        setInventoryDefault('');
+        const normalizedPrices = normalizePriceOverrides(product?.variants?.[PRICE_OVERRIDE_VARIANTS_KEY]);
+        setPriceOverridesEnabled(Object.keys(normalizedPrices).length > 0);
+        setPriceOverridesDraft(() => {
+          const out = {};
+          Object.entries(normalizedPrices).forEach(([key, value]) => {
+            out[String(key)] = String(value);
+          });
+          return out;
+        });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [open, product?.id]);
 
       const onFiles = (e) => {
         const files = Array.from(e.target.files || []);
@@ -2418,33 +2827,274 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const prevImg = () => setGalleryIndex(i => (i - 1 + images.length) % images.length);
       const nextImg = () => setGalleryIndex(i => (i + 1) % images.length);
 
+      const familyOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.families)
+          ? catalogConfig.families.map((f) => String(f?.name || '').trim()).filter(Boolean)
+          : [];
+        const base = list.length ? list : ['iPhone', 'Samsung S', 'Samsung A', 'Accessories'];
+        const current = String(family || '').trim();
+        return current && !base.includes(current) ? [...base, current] : base;
+      }, [catalogConfig, family]);
+
+      const categoryOptions = useMemo(() => {
+        const list = Array.isArray(catalogConfig?.categories) ? catalogConfig.categories.filter(Boolean) : [];
+        const base = list.length ? list : CATEGORIES.filter((c) => c !== 'All');
+        const current = String(category || '').trim();
+        const withAll = ['All', ...base];
+        return current && current !== 'All' && !base.includes(current) ? [...withAll, current] : withAll;
+      }, [catalogConfig, category]);
+
+      const familyModels = useMemo(() => {
+        const famName = String(family || '').trim();
+        const families = Array.isArray(catalogConfig?.families) ? catalogConfig.families : [];
+        const match = families.find((f) => String(f?.name || '').trim() === famName);
+        const list = Array.isArray(match?.models) ? match.models.map((m) => String(m).trim()).filter(Boolean) : [];
+        if (list.length) return list;
+        const lower = famName.toLowerCase();
+        if (lower.includes('iphone')) return IPHONE_MODELS;
+        if (lower.includes('samsung s')) return SAMSUNG_S_MODELS;
+        if (lower.includes('samsung a')) return SAMSUNG_A_MODELS;
+        return [...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS];
+      }, [catalogConfig, family]);
+
+      const customerOptionMap = useMemo(() => {
+        const out = {};
+        Object.entries(variants || {}).forEach(([key, val]) => {
+          if (!key || String(key).startsWith('__')) return;
+          if (!Array.isArray(val) || val.length === 0) return;
+          out[key] = val;
+        });
+        return out;
+      }, [variants]);
+
+      const optionKeys = useMemo(() => {
+        const keys = Object.keys(customerOptionMap);
+        const priority = ['Model', 'Color'];
+        keys.sort((a, b) => {
+          const ai = priority.indexOf(a);
+          const bi = priority.indexOf(b);
+          if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+          return a.localeCompare(b);
+        });
+        return keys;
+      }, [customerOptionMap]);
+
+      const combos = useMemo(() => computeVariantCombos(customerOptionMap), [customerOptionMap]);
+      const comboKeySet = useMemo(() => new Set(combos.map(({ key }) => key)), [combos]);
+
+      const formatComboLabel = (selection) => {
+        const entries = Object.entries(selection || {})
+          .filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (!entries.length) return 'Base product';
+        return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
+      };
+
+      const models = Array.from(new Set([...(Array.isArray(variants.Model) ? variants.Model : [])]));
+      const colors = Array.from(new Set([...(Array.isArray(variants.Color) ? variants.Color : [])]));
+
+      const moveImageToFront = (index) => {
+        setImages((prev) => {
+          if (index <= 0 || index >= prev.length) return prev;
+          const next = [...prev];
+          const [picked] = next.splice(index, 1);
+          next.unshift(picked);
+          return next;
+        });
+        setGalleryIndex(0);
+      };
+
+      const removeImage = (index) => {
+        setImages((prev) => prev.filter((_, i) => i !== index));
+        setGalleryIndex((i) => {
+          if (i === index) return 0;
+          if (i > index) return i - 1;
+          return i;
+        });
+      };
+
+      const setRowField = (id, field, value) => {
+        setSpecRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+      };
+      const addSpecRow = () => setSpecRows((prev) => [...prev, { id: makeId(), label: '', value: '' }]);
+      const removeSpecRow = (id) => setSpecRows((prev) => prev.filter((row) => row.id !== id));
+
+      const setGroupOptions = (groupKey, list) => {
+        const key = String(groupKey || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const cleaned = Array.from(new Set((Array.isArray(list) ? list : []).map((v) => String(v).trim()).filter(Boolean)));
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          if (cleaned.length) next[key] = cleaned;
+          else delete next[key];
+          return next;
+        });
+      };
+
+      const removeGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        setVariants((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+        setOptionDraft((prev) => {
+          const next = { ...(prev || {}) };
+          delete next[key];
+          return next;
+        });
+      };
+
+      const addOptionsToGroup = (groupKey) => {
+        const key = String(groupKey || '').trim();
+        if (!key) return;
+        const parsed = parseCsvLines(optionDraft[key] || '');
+        if (!parsed.length) return;
+        const current = Array.isArray(variants?.[key]) ? variants[key] : [];
+        setGroupOptions(key, [...current, ...parsed]);
+        setOptionDraft((prev) => ({ ...(prev || {}), [key]: '' }));
+      };
+
+      const createNewGroup = () => {
+        const key = String(newGroupName || '').trim();
+        if (!key || key.startsWith('__')) return;
+        const parsed = parseCsvLines(newGroupOptions);
+        if (!parsed.length) return;
+        setGroupOptions(key, parsed);
+        setNewGroupName('');
+        setNewGroupOptions('');
+        setNewGroupOpen(false);
+      };
+
+      const applyInventoryDefaultToAll = () => {
+        const trimmed = String(inventoryDefault || '').trim();
+        if (!trimmed) return;
+        const numeric = Number(trimmed);
+        if (!Number.isFinite(numeric) || numeric < 0) return;
+        const value = String(Math.floor(numeric));
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = value; });
+          return next;
+        });
+      };
+
+      const clearInventoryAll = () => {
+        setInventoryDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { next[key] = ''; });
+          return next;
+        });
+      };
+
+      const clearPricesAll = () => {
+        setPriceOverridesDraft((prev) => {
+          const next = { ...(prev || {}) };
+          combos.forEach(({ key }) => { if (key !== INVENTORY_BASE_KEY) next[key] = ''; });
+          return next;
+        });
+      };
+
       const save = () => {
-        const sanitizedVariants = Object.fromEntries(
-          Object.entries(variants || {}).map(([key, val]) => {
-            const list = Array.isArray(val) ? val.map(v => String(v).trim()).filter(Boolean) : [];
-            return [key, Array.from(new Set(list))];
-          }).filter(([, list]) => Array.isArray(list) && list.length)
-        );
         const trimmedName = name.trim() || product.name;
         const trimmedSku = sku.trim() || product.sku;
         const priceNumber = Number(price);
+        const resolvedPrice = Number.isFinite(priceNumber) && priceNumber >= 0 ? priceNumber : Number(product.price) || 0;
+        const resolvedCategory = String(category || product.category || '').trim() || 'All';
+        const resolvedFamily = String(family || '').trim();
+
+        const existingMetaSpecs = (Array.isArray(product?.specs) ? product.specs : [])
+          .filter((s) => {
+            const value = String(s || '');
+            return value && value.startsWith(META_SPEC_PREFIX) && !value.startsWith(META_FAMILY_PREFIX);
+          })
+          .map((s) => String(s));
+
+        const infoSpecs = specRows
+          .map((row) => {
+            const label = String(row?.label || '').trim();
+            if (!label) return null;
+            const value = String(row?.value || '').trim();
+            return value ? `${label}: ${value}` : label;
+          })
+          .filter(Boolean);
+
+        const specs = Array.from(new Set([
+          ...(resolvedFamily ? [`${META_FAMILY_PREFIX}${resolvedFamily}`] : []),
+          ...existingMetaSpecs,
+          ...infoSpecs,
+        ]));
+
+        const preservedMetaVariants = {};
+        if (product?.variants && typeof product.variants === 'object' && !Array.isArray(product.variants)) {
+          Object.entries(product.variants).forEach(([key, val]) => {
+            if (!key || key === PRICE_OVERRIDE_VARIANTS_KEY) return;
+            if (Array.isArray(val)) return;
+            if (String(key).startsWith('__')) preservedMetaVariants[key] = val;
+          });
+        }
+
+        const sanitizedGroups = {};
+        Object.entries(customerOptionMap || {}).forEach(([key, val]) => {
+          const label = String(key || '').trim();
+          if (!label) return;
+          const list = Array.from(new Set((Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter(Boolean)));
+          if (list.length) sanitizedGroups[label] = list;
+        });
+
+        const nextVariants = { ...preservedMetaVariants, ...sanitizedGroups };
+
+        if (priceOverridesEnabled) {
+          const baseNumeric = resolvedPrice;
+          const priceMap = {};
+          Object.entries(priceOverridesDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey || normalizedKey === INVENTORY_BASE_KEY) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            if (Math.abs(numeric - baseNumeric) < 1e-9) return;
+            priceMap[normalizedKey] = numeric;
+          });
+          if (Object.keys(priceMap).length) nextVariants[PRICE_OVERRIDE_VARIANTS_KEY] = priceMap;
+        }
+
+        const nextInventory = {};
+        if (inventoryEnabled) {
+          Object.entries(inventoryDraft || {}).forEach(([key, raw]) => {
+            const normalizedKey = String(key || '').trim();
+            if (!normalizedKey) return;
+            if (!comboKeySet.has(normalizedKey)) return;
+            const trimmed = String(raw ?? '').trim();
+            if (!trimmed) return;
+            const numeric = Number(trimmed);
+            if (!Number.isFinite(numeric) || numeric < 0) return;
+            nextInventory[normalizedKey] = Math.floor(numeric);
+          });
+        }
+
+        const uniqueImages = Array.from(new Set((images || []).map((src) => String(src || '')).filter(Boolean)));
         const normalized = normalizeProductRow({
           ...(product || {}),
           name: trimmedName,
           sku: trimmedSku,
-          price: Number.isFinite(priceNumber) && priceNumber > 0 ? priceNumber : Number(product.price) || 0,
+          category: resolvedCategory,
+          price: resolvedPrice,
           description,
-          images: images.length ? images : undefined,
-          image: images[0] || undefined,
-          variants: sanitizedVariants
+          images: uniqueImages,
+          image: uniqueImages[0] || undefined,
+          specs,
+          variants: nextVariants,
+          inventory: nextInventory,
         });
         onSave(normalized, product?.id);
         onClose();
       };
 
       const isOwnerItem = !!product?.id?.startsWith?.('owner-');
-      const models = Array.from(new Set([...(variants.Model || [])]));
-      const colors = Array.from(new Set([...(variants.Color || [])]));
 
       if (!open || !product) return null;
 
@@ -2506,7 +3156,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                         <button type="button" onClick={()=> setGalleryIndex(i)} className="absolute inset-0">
                           <img src={resolveImageSrc(src, product.name)} alt="" className="h-full w-full object-cover" />
                         </button>
-                        <button type="button" onClick={()=> setImages(prev => prev.filter((_,idx)=> idx!==i))}
+                        <button type="button" onClick={()=> removeImage(i)}
                           className="absolute -right-1 -top-1 rounded-full bg-white border p-0.5 shadow" aria-label={`Remove photo ${i+1}`}>×</button>
                       </div>
                     ))}
@@ -2516,6 +3166,27 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
 
               {/* Right: editable form */}
               <div className="flex min-w-0 flex-col gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Family</span>
+                    <select value={family} onChange={(e) => setFamily(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      <option value="">(none)</option>
+                      {familyOptions.map((f) => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-slate-700">Category</span>
+                    <select value={category} onChange={(e) => setCategory(e.target.value)}
+                      className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand">
+                      {categoryOptions.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <label className="block text-sm">
                   <span className="mb-1 block text-slate-700">Name</span>
                   <input value={name} onChange={(e)=> setName(e.target.value)}
@@ -2529,7 +3200,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                 </label>
 
                 <label className="block text-sm">
-                  <span className="mb-1 block text-slate-700">Price</span>
+                  <span className="mb-1 block text-slate-700">Base price</span>
                   <input type="number" min={0} step="0.01" value={price} onChange={(e)=> setPrice(e.target.value)}
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
@@ -2540,59 +3211,231 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
                     className="w-full rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3.5 py-2.5 text-sm text-slate-800 shadow-inner backdrop-blur focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"/>
                 </label>
 
-                {/* Variants — same idea as your previous editor but cleaner */}
-                <div className="grid gap-3">
-                  {!!(product?.variants?.Model) && (
-                    <PillsMulti
-                      label="Models"
-                      options={[...IPHONE_MODELS, ...SAMSUNG_S_MODELS, ...SAMSUNG_A_MODELS]}
-                      value={models}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Model: arr }))}
-                    />
-                  )}
-                  {!!(product?.variants?.Color) && (
-                    <PillsMulti
-                      label="Colors"
-                      options={CASE_COLORS}
-                      value={colors}
-                      onChange={(arr)=> setVariants(v => ({ ...v, Color: arr }))}
-                    />
-                  )}
-                  {Object.entries(product?.variants||{})
-                    .filter(([k])=> k!=='Model' && k!=='Color')
-                    .map(([k,opts])=> (
-                      <div key={k} className="text-sm">
-                        <span className="mb-1 block text-slate-700">{k}</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {(variants[k]||opts).map(opt => (
-                            <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600">
-                              {opt}
-                              <button type="button" onClick={()=> setVariants(v=> ({...v, [k]: (v[k]||opts).filter(x=> x!==opt)}))} aria-label={`Remove ${opt}`}>×</button>
-                            </span>
-                          ))}
-                        </div>
-                        <div className="mt-1 flex gap-2">
-                          <input type="text" placeholder={`Add ${k} option`} className="w-44 rounded-2xl border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-medium text-slate-700 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onKeyDown={(e)=> {
-                              if (e.key==='Enter') {
-                                const val = e.currentTarget.value.trim();
-                                if (val) setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                e.currentTarget.value='';
-                              }
-                            }}/>
-                          <button type="button" className="rounded-full border border-[var(--surface-border)] bg-white/70 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-white focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
-                            onClick={(e)=> {
-                              const inp = e.currentTarget.previousSibling;
-                              if (inp && inp.value) {
-                                const val = inp.value.trim();
-                                setVariants(v => ({ ...v, [k]: Array.from(new Set([...(v[k]||opts), val])) }));
-                                inp.value='';
-                              }
-                            }}>Add</button>
-                        </div>
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Product information</span>
+                    <button type="button" onClick={addSpecRow}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white">Add</button>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {specRows.map((row) => (
+                      <div key={row.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center">
+                        <input
+                          value={row.label}
+                          onChange={(e) => setRowField(row.id, 'label', e.target.value)}
+                          placeholder="Label"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <input
+                          value={row.value}
+                          onChange={(e) => setRowField(row.id, 'value', e.target.value)}
+                          placeholder="Value (optional)"
+                          className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeSpecRow(row.id)}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                          aria-label="Remove row"
+                        >×</button>
                       </div>
-                    ))
-                  }
+                    ))}
+                    {specRows.length === 0 && (
+                      <p className="text-xs text-slate-500">No product information yet.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">Customer options</span>
+                    <button
+                      type="button"
+                      onClick={() => setNewGroupOpen((v) => !v)}
+                      className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                    >
+                      Add option group
+                    </button>
+                  </div>
+
+                  {newGroupOpen && (
+                    <div className="mt-3 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Group name</span>
+                          <input
+                            value={newGroupName}
+                            onChange={(e) => setNewGroupName(e.target.value)}
+                            placeholder="e.g. RAM"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                        <label className="block text-sm">
+                          <span className="mb-1 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Options</span>
+                          <textarea
+                            rows={2}
+                            value={newGroupOptions}
+                            onChange={(e) => setNewGroupOptions(e.target.value)}
+                            placeholder="One per line or comma-separated"
+                            className="w-full rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-2 flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setNewGroupOpen(false); setNewGroupName(''); setNewGroupOptions(''); }}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-white/70"
+                        >
+                          Cancel
+                        </button>
+                        <button type="button" onClick={createNewGroup} className="rounded-full bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-muted">
+                          Add group
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-3 grid gap-3">
+                    {optionKeys.length === 0 && (
+                      <p className="text-xs text-slate-500">No customer option groups yet.</p>
+                    )}
+                    {optionKeys.map((k) => {
+                      const opts = Array.isArray(variants?.[k]) ? variants[k] : [];
+                      const draft = optionDraft[k] || '';
+                      const optionsList = k === 'Model'
+                        ? Array.from(new Set([...(familyModels || []), ...opts]))
+                        : (k === 'Color' ? Array.from(new Set([...(CASE_COLORS || []), ...opts])) : opts);
+
+                      return (
+                        <div key={k} className="space-y-2 rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-slate-800">{k}</span>
+                            <button type="button" onClick={() => removeGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white/70 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                              aria-label={`Remove ${k}`}>×</button>
+                          </div>
+
+                          {k === 'Model' || k === 'Color' ? (
+                            <PillsMulti
+                              label={k === 'Model' ? 'Models' : 'Colors'}
+                              options={optionsList}
+                              value={opts}
+                              onChange={(arr) => setGroupOptions(k, arr)}
+                            />
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5 text-xs">
+                              {opts.map((opt) => (
+                                <span key={opt} className="inline-flex items-center gap-1 rounded-full border border-[var(--surface-border)] bg-white px-2.5 py-1 text-xs font-medium text-slate-600">
+                                  {opt}
+                                  <button type="button" onClick={() => setGroupOptions(k, opts.filter((x) => x !== opt))}
+                                    className="text-slate-500 hover:text-slate-800" aria-label={`Remove ${opt}`}>×</button>
+                                </span>
+                              ))}
+                              {opts.length === 0 && <span className="text-xs text-slate-500">No options yet.</span>}
+                            </div>
+                          )}
+
+                          <div className="flex gap-2">
+                            <input
+                              value={draft}
+                              onChange={(e) => setOptionDraft((prev) => ({ ...(prev || {}), [k]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addOptionsToGroup(k);
+                                }
+                              }}
+                              placeholder="Add options (comma or newline)"
+                              className="flex-1 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                            <button type="button" onClick={() => addOptionsToGroup(k)}
+                              className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Add</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Stock limits (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={inventoryEnabled} onChange={(e) => setInventoryEnabled(e.target.checked)} />
+                      Limit stock
+                    </label>
+                  </div>
+                  {inventoryEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={inventoryDefault}
+                            onChange={(e) => setInventoryDefault(e.target.value)}
+                            placeholder="Default (e.g. 10)"
+                            inputMode="numeric"
+                            className="w-40 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-2 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                          />
+                          <button type="button" onClick={applyInventoryDefaultToAll}
+                            className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Apply</button>
+                        </div>
+                        <button type="button" onClick={clearInventoryAll}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear</button>
+                      </div>
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => (
+                          <div key={key} className="flex items-center justify-between gap-3">
+                            <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                            <input
+                              value={inventoryDraft[key] ?? ''}
+                              onChange={(e) => setInventoryDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                              inputMode="numeric"
+                              placeholder="∞"
+                              className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank for unlimited stock.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[var(--surface-border)] bg-white/70 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-slate-800">Variant prices (optional)</span>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                      <input type="checkbox" checked={priceOverridesEnabled} onChange={(e) => setPriceOverridesEnabled(e.target.checked)} />
+                      Override prices
+                    </label>
+                  </div>
+                  {priceOverridesEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="flex justify-end">
+                        <button type="button" onClick={clearPricesAll}
+                          className="rounded-full border border-[var(--surface-border)] bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-white/70">Clear overrides</button>
+                      </div>
+                      <div className="max-h-56 overflow-y-auto rounded-2xl border border-[var(--surface-border)] bg-white/80 p-3 space-y-2">
+                        {combos.map(({ key, selection }) => {
+                          if (key === INVENTORY_BASE_KEY) return null;
+                          return (
+                            <div key={key} className="flex items-center justify-between gap-3">
+                              <span className="text-xs text-slate-600">{formatComboLabel(selection)}</span>
+                              <input
+                                value={priceOverridesDraft[key] ?? ''}
+                                onChange={(e) => setPriceOverridesDraft((prev) => ({ ...(prev || {}), [key]: e.target.value }))}
+                                inputMode="decimal"
+                                placeholder={String(Number(price) || 0)}
+                                className="w-24 rounded-2xl border border-[var(--surface-border)] bg-white px-3 py-1.5 text-sm text-slate-800 shadow-inner focus:outline-none focus-visible:outline-2 focus-visible:outline-brand"
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-slate-500">Leave blank to use the base price.</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-2 flex justify-end gap-3">
@@ -2606,7 +3449,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       );
     }
 
-    function OwnerManager({ products, onClose, onEdit, onHide, onDelete, onSave }) {
+    function OwnerManager({ products, catalogConfig, onClose, onEdit, onHide, onDelete, onSave }) {
       const [search, setSearch] = useState("");
       const [editing, setEditing] = useState(null);
 
@@ -2641,7 +3484,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
             )
           ),
           React.createElement('div', { className: 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4' }, (filtered||[]).map(p => React.createElement('article', { key: p.id, className: 'group flex flex-col overflow-hidden rounded-3xl border border-[var(--surface-border)] bg-white/80 backdrop-blur transition hover:-translate-y-0.5 hover:shadow-soft-xl' }, React.createElement('div', { className: 'aspect-square w-full bg-gray-100' }, React.createElement('img', { src: resolveImageSrc((Array.isArray(p.images)&&p.images[0]) || p.image || '', p.name), onError: (e)=> { e.currentTarget.src = buildPlaceholderDataURI(p.name); }, alt: p.name, className: 'h-full w-full object-cover' })), React.createElement('div', { className: 'flex flex-1 flex-col gap-3 p-4' }, React.createElement('header', null, React.createElement('h3', { className: 'text-base font-semibold text-slate-900' }, p.name), React.createElement('p', { className: 'mt-0.5 text-xs text-slate-500' }, 'SKU: ', p.sku)), React.createElement('div', { className: 'flex flex-wrap gap-1.5' }, (p.specs||[]).slice(0,4).map(s => React.createElement('span', { key: s, className: 'inline-flex items-center rounded-full border border-[var(--surface-border)] bg-white/80 px-2.5 py-0.5 text-xs font-medium text-slate-600' }, s))), React.createElement('div', { className: 'mt-auto flex items-center justify-between' }, React.createElement('span', { className: 'font-semibold text-slate-900' }, fmt(p.price)), p.minOrder && React.createElement('span', { className: 'text-xs text-slate-500' }, 'MOQ ', p.minOrder)), React.createElement('div', { className: 'flex gap-2' }, React.createElement('button', { onClick: ()=> setEditing(p), className: 'flex-1 rounded-full bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-muted' }, 'Edit'), p.id.startsWith('owner-') ? React.createElement('button', { onClick: ()=> onDelete(p.id), className: 'rounded-full border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50' }, 'Delete') : React.createElement('button', { onClick: ()=> onHide(p.id), className: 'rounded-full border border-[var(--surface-border)] bg-white/70 px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white' }, 'Hide')))))) ,
-          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, onSave: onSave, onHide: onHide, onDelete: onDelete })
+          React.createElement(OwnerProductModal, { open: !!editing, onClose: ()=> setEditing(null), product: editing, catalogConfig, onSave: onSave, onHide: onHide, onDelete: onDelete })
         )
       );
     }
@@ -2652,6 +3495,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
       const lastCatalogScrollRef = React.useRef(0);
       const [search, setSearch] = useState("");
       const [category, setCategory] = useState("All");
+      const [family, setFamily] = useState("All");
       const [selectedProduct, setSelectedProduct] = useState(null);
       const [cartOpen, setCartOpen] = useState(false);
       const [ownerManage, setOwnerManage] = useState(false); // owner manager UI toggle
@@ -2671,6 +3515,28 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
       }, []);
       const { ownerProducts, setOwnerProducts, addProduct, deleteProduct, loading, connectionStatus } = useOwnerProducts();
+      const catalogConfig = useCatalogConfig(ownerProducts);
+
+      const families = useMemo(() => {
+        const fromConfig = (catalogConfig?.families || [])
+          .map((f) => (f && typeof f === 'object' ? f.name : null))
+          .filter(Boolean);
+        const fallback = ['iPhone', 'Samsung S', 'Samsung A', 'Accessories'];
+        const list = fromConfig.length ? fromConfig : fallback;
+        const uniq = [];
+        const seen = new Set();
+        list.forEach((name) => {
+          const trimmed = String(name || '').trim();
+          if (!trimmed || seen.has(trimmed)) return;
+          seen.add(trimmed);
+          uniq.push(trimmed);
+        });
+        return ['All', ...uniq];
+      }, [catalogConfig]);
+
+      useEffect(() => {
+        if (!families.includes(family)) setFamily('All');
+      }, [families, family]);
 
       const shouldLockScroll = Boolean(selectedProduct || cartOpen);
       useBodyScrollLock(shouldLockScroll, lastCatalogScrollRef);
@@ -2681,6 +3547,7 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         const newProducts = [];
         
         ownerProducts.forEach(op => {
+          if (!op || op.id === CONFIG_PRODUCT_ID) return;
           if (op.sourceId && map.has(op.sourceId)) {
             if (op.hidden) {
               map.delete(op.sourceId);
@@ -2702,12 +3569,49 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         // Return new products first, then existing products
         return [...newProducts, ...Array.from(map.values())];
       }, [ownerProducts]);
+
+      const categoryIndex = useMemo(() => {
+        const byFamily = new Map();
+        const all = new Set();
+        allProducts.forEach((p) => {
+          if (!p || p.id === CONFIG_PRODUCT_ID) return;
+          const cat = String(p.category || '').trim();
+          if (!cat || cat === 'All') return;
+          const fam = getProductFamily(p);
+          if (!byFamily.has(fam)) byFamily.set(fam, new Set());
+          byFamily.get(fam).add(cat);
+          all.add(cat);
+        });
+        return { byFamily, all };
+      }, [allProducts]);
+
+      const categories = useMemo(() => {
+        const fromConfig = Array.isArray(catalogConfig?.categories) ? catalogConfig.categories.filter(Boolean) : [];
+        const baseOrder = fromConfig.length ? fromConfig : CATEGORIES.filter((c) => c !== 'All');
+        const visibleSet = family === 'All'
+          ? categoryIndex.all
+          : (categoryIndex.byFamily.get(family) || new Set());
+        const ordered = baseOrder.filter((cat) => visibleSet.has(cat));
+        const extras = Array.from(visibleSet)
+          .filter((cat) => !baseOrder.includes(cat))
+          .sort((a, b) => a.localeCompare(b));
+        return ['All', ...ordered, ...extras];
+      }, [catalogConfig, family, categoryIndex]);
+
+      useEffect(() => {
+        if (!categories.includes(category)) setCategory('All');
+      }, [categories, category]);
+
+      useEffect(() => {
+        setCategory('All');
+      }, [family]);
       const filteredProducts = useMemo(() => {
         let filtered = allProducts;
+        if (family !== "All") filtered = filtered.filter(p => getProductFamily(p) === family);
         if (category !== "All") filtered = filtered.filter(p => p.category === category);
         if (search) filtered = filtered.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()) || (p.description || '').toLowerCase().includes(search.toLowerCase()));
         return filtered;
-      }, [allProducts, category, search]);
+      }, [allProducts, family, category, search]);
       const productLookup = useMemo(() => {
         const map = new Map();
         allProducts.forEach((p) => {
@@ -2800,18 +3704,18 @@ const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
         notice && React.createElement('div', { className: cx('fixed bottom-4 right-4 z-40 max-w-sm rounded-lg border px-4 py-3 text-sm shadow-lg backdrop-blur', notice.type === 'error' ? 'border-red-200 bg-red-50/90 text-red-700' : notice.type === 'warning' ? 'border-amber-200 bg-amber-50/90 text-amber-800' : 'border-emerald-200 bg-emerald-50/90 text-emerald-700') },
           React.createElement('div', { className: 'flex items-start gap-3' },
             React.createElement('span', { className: 'flex-1 leading-snug' }, notice.message),
-            React.createElement('button', { type: 'button', onClick: ()=> setNotice(null), className: 'text-xs font-medium uppercase tracking-wide text-slate-500 hover:text-slate-700' }, 'Dismiss')
+          React.createElement('button', { type: 'button', onClick: ()=> setNotice(null), className: 'text-xs font-medium uppercase tracking-wide text-slate-500 hover:text-slate-700' }, 'Dismiss')
           )
         ),
-  React.createElement(Header, { onOpenCart: ()=> { lastCatalogScrollRef.current = window.scrollY || 0; setCartOpen(true); }, search, setSearch, ownerMode, setOwnerMode: toggleOwnerMode, cartQty, connectionStatus, allowOwnerToggle: OWNER_TOGGLE_ENABLED }),
+  React.createElement(Header, { onOpenCart: ()=> { lastCatalogScrollRef.current = window.scrollY || 0; setCartOpen(true); }, search, setSearch, ownerMode, setOwnerMode: toggleOwnerMode, cartQty, connectionStatus, allowOwnerToggle: OWNER_TOGGLE_ENABLED, families, family, setFamily }),
         ownerMode ? (
           ownerManage ? (
-            React.createElement(OwnerManager, { products: allProducts, onClose: ()=> setOwnerManage(false), onEdit: (p)=> { lastCatalogScrollRef.current = window.scrollY || 0; setSelectedProduct({ __edit: true, product: p }); }, onHide: (baseId)=> hideBase(baseId), onDelete: (id)=> deleteOwnerProduct(id), onSave: saveEdit })
+            React.createElement(OwnerManager, { products: allProducts, catalogConfig, onClose: ()=> setOwnerManage(false), onEdit: (p)=> { lastCatalogScrollRef.current = window.scrollY || 0; setSelectedProduct({ __edit: true, product: p }); }, onHide: (baseId)=> hideBase(baseId), onDelete: (id)=> deleteOwnerProduct(id), onSave: saveEdit })
           ) : (
             React.createElement(OwnerPage, { addProduct: addProduct, products: ownerProducts, removeProduct: (id)=> deleteOwnerProduct(id), onNotify: pushNotice })
           )
         ) : (
-          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
+          React.createElement(React.Fragment, null, React.createElement(Hero), React.createElement(CategoryChips, { categories, active: category, setActive: setCategory }), React.createElement(ProductGrid, { 
             products: filteredProducts, 
             onOpen: (p) => {
               lastCatalogScrollRef.current = window.scrollY || 0;
